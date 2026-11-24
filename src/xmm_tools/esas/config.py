@@ -94,6 +94,52 @@ class SpectrumConfig:
 
 
 @dataclass
+class BandSpec:
+    """Target energy band for quick-look flux imaging (energies in eV)."""
+
+    name: str
+    emin: int
+    emax: int
+    subbands: list[list[int]] = field(default_factory=list)
+
+
+def _default_quick_bands() -> dict[str, BandSpec]:
+    return {
+        "soft": BandSpec(
+            name="soft",
+            emin=500,
+            emax=2000,
+            subbands=[[500, 1000], [1000, 2000]],
+        ),
+        "hard": BandSpec(
+            name="hard",
+            emin=2000,
+            emax=7000,
+            subbands=[[2000, 4500], [4500, 7000]],
+        ),
+    }
+
+
+@dataclass
+class QuickImageConfig:
+    """Parameters for ``evqpb`` + ``eimageget`` + ``eimagecombine`` quick imaging."""
+
+    dir: str = "quick_image"
+    bin_size: int = 40
+    with_vignetting: bool = True
+    use_cheese_mask: bool = False
+    combine_instruments: bool = True
+    attfile: str = ""
+    default_subband_edges: list[int] = field(
+        default_factory=lambda: [350, 500, 750, 1000, 1500, 2000, 3000, 4500, 7000, 10000]
+    )
+    bands: dict[str, BandSpec] = field(default_factory=_default_quick_bands)
+    evqpb_extra_params: dict[str, Any] = field(default_factory=dict)
+    eimageget_extra_params: dict[str, Any] = field(default_factory=dict)
+    eimagecombine_extra_params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ImagingConfig:
     """Parameters for ESAS multi-band imaging."""
 
@@ -113,6 +159,7 @@ class ESASConfig:
     espfilt: EspfiltConfig = field(default_factory=EspfiltConfig)
     source_detect: SourceDetectConfig = field(default_factory=SourceDetectConfig)
     spectrum: SpectrumConfig = field(default_factory=SpectrumConfig)
+    quick_image: QuickImageConfig = field(default_factory=QuickImageConfig)
     imaging: ImagingConfig = field(default_factory=ImagingConfig)
 
     @classmethod
@@ -188,6 +235,46 @@ class ESASConfig:
             regions=[str(x) for x in spec_sec.get("regions", [])],
         )
 
+        qi_sec = _table(raw, "quick_image")
+        qi_bands_raw = qi_sec.get("bands")
+        if isinstance(qi_bands_raw, dict) and qi_bands_raw:
+            qi_bands: dict[str, BandSpec] = {}
+            for bname, bval in qi_bands_raw.items():
+                if not isinstance(bval, dict):
+                    raise ValueError(f"Expected [quick_image.bands.{bname}] table")
+                qi_bands[bname] = BandSpec(
+                    name=bname,
+                    emin=int(bval["emin"]),
+                    emax=int(bval["emax"]),
+                    subbands=[
+                        [int(a), int(b)] for a, b in bval.get("subbands", [])
+                    ],
+                )
+        else:
+            qi_bands = _default_quick_bands()
+
+        quick_image = QuickImageConfig(
+            dir=str(qi_sec.get("dir", "quick_image")),
+            bin_size=int(qi_sec.get("bin_size", 40)),
+            with_vignetting=bool(qi_sec.get("with_vignetting", True)),
+            use_cheese_mask=bool(qi_sec.get("use_cheese_mask", False)),
+            combine_instruments=bool(qi_sec.get("combine_instruments", True)),
+            attfile=str(qi_sec.get("attfile", "")),
+            default_subband_edges=[
+                int(x)
+                for x in qi_sec.get(
+                    "default_subband_edges",
+                    [350, 500, 750, 1000, 1500, 2000, 3000, 4500, 7000, 10000],
+                )
+            ],
+            bands=qi_bands,
+            evqpb_extra_params=dict(qi_sec.get("evqpb_extra_params", {})),
+            eimageget_extra_params=dict(qi_sec.get("eimageget_extra_params", {})),
+            eimagecombine_extra_params=dict(
+                qi_sec.get("eimagecombine_extra_params", {})
+            ),
+        )
+
         img_sec = _table(raw, "imaging")
         imaging = ImagingConfig(
             bands=[
@@ -204,6 +291,7 @@ class ESASConfig:
             espfilt=espfilt,
             source_detect=source_detect,
             spectrum=spectrum,
+            quick_image=quick_image,
             imaging=imaging,
         )
 
@@ -281,6 +369,28 @@ max_workers = 2                      # Concurrent workers for multi-region extra
 elow = 400                           # Default spectrum lower energy bound (eV)
 ehigh = 12500                        # Default spectrum upper energy bound (eV)
 regions = []                         # Target region names or .reg files
+
+[quick_image]
+dir = "quick_image"                  # Output directory for quick-look QPB-subtracted flux images
+bin_size = 40                        # Spatial pixel bin size (40 physical units ≈ 2 arcsec/pix)
+with_vignetting = true               # Apply telescope vignetting correction in eimageget
+use_cheese_mask = false              # Apply cheese point-source masks if available
+combine_instruments = true           # Merge MOS1+MOS2+PN with eimagecombine per target band
+attfile = ""                         # Attitude FITS file (empty = reuse atthk.fits or run atthkgen)
+default_subband_edges = [350, 500, 750, 1000, 1500, 2000, 3000, 4500, 7000, 10000]
+evqpb_extra_params = {{}}              # Extra key=value parameters passed through to evqpb
+eimageget_extra_params = {{}}          # Extra key=value parameters passed through to eimageget
+eimagecombine_extra_params = {{}}      # Extra key=value parameters passed through to eimagecombine
+
+[quick_image.bands.soft]
+emin = 500                           # Target soft-band lower bound (eV)
+emax = 2000                          # Target soft-band upper bound (eV)
+subbands = [[500, 1000], [1000, 2000]]  # Narrow sub-bands for accurate exposure weighting
+
+[quick_image.bands.hard]
+emin = 2000                          # Target hard-band lower bound (eV)
+emax = 7000                          # Target hard-band upper bound (eV)
+subbands = [[2000, 4500], [4500, 7000]]
 
 [imaging]
 bands = [[400, 1250], [2000, 7000]]  # Energy bands for imaging [elow, ehigh] (eV)

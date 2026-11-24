@@ -8,6 +8,7 @@ import sys
 from xmm_tools.esas.config import ESASConfig
 from xmm_tools.esas.flare import run_flare
 from xmm_tools.esas.init import initialize_observation
+from xmm_tools.esas.quick_image import run_quick_image
 from xmm_tools.esas.source_detect import run_source_detect
 
 
@@ -107,6 +108,31 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run source detection even if manifest exists.",
     )
+
+    p_qi = sub.add_parser(
+        "quick-image",
+        help="Generate QPB-subtracted flux images via evqpb + eimageget + eimagecombine.",
+    )
+    p_qi.add_argument(
+        "--config",
+        default="esas.toml",
+        help="Path to esas.toml (default: ./esas.toml).",
+    )
+    p_qi.add_argument(
+        "--docker",
+        default=None,
+        help="Optional Docker container name to run SAS commands inside.",
+    )
+    p_qi.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate config without running SAS commands.",
+    )
+    p_qi.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run quick imaging even if manifest exists.",
+    )
     return parser
 
 
@@ -158,6 +184,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  emllist: {res.emllist.name}")
         for key, path in res.cheese_masks.items():
             print(f"  mask[{key}]: {path.name}")
+        return 0
+
+    if args.subcommand == "quick-image":
+        cfg = ESASConfig.from_toml(args.config)
+        res = run_quick_image(
+            cfg,
+            dry_run=args.dry_run,
+            force=args.force,
+            docker_container=args.docker,
+        )
+        print(f"Quick-image dir: {res.quick_image_dir}")
+        print(f"Manifest:        {res.manifest_path}")
+        for band, path in res.band_flux_images.items():
+            print(f"  flux[{band}]: {path.name}")
         return 0
 
     return 1
