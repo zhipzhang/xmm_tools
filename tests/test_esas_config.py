@@ -46,6 +46,21 @@ class TestESASConfig(unittest.TestCase):
             self.assertEqual(cfg.source_detect.elowlist, [350, 2500])
             self.assertEqual(cfg.imaging.bands, [[400, 1250], [2000, 7000]])
 
+    def test_spectrum_regions_toml_parsing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            toml_path = root / "esas.toml"
+            toml_path.write_text(
+                render_template_toml(workdir=".")
+                + '\n[[spectrum.regions]]\nname = "east"\nfile = "east.reg"\nmode = "split"\noverwrite = true\n',
+                encoding="utf-8",
+            )
+            cfg = ESASConfig.from_toml(toml_path)
+            self.assertEqual(len(cfg.spectrum.regions), 1)
+            self.assertEqual(cfg.spectrum.regions[0].name, "east")
+            self.assertEqual(cfg.spectrum.regions[0].mode, "split")
+            self.assertTrue(cfg.spectrum.regions[0].overwrite)
+
 
 class TestESASInit(unittest.TestCase):
     def test_standardize_event_files_picks_largest_exposure(self):

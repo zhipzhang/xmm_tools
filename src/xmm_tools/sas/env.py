@@ -32,6 +32,7 @@ class SASEnv:
     sas_ccfpath: Path | str | None = None
     sas_odf: Path | str | None = None
     caldb: Path | str | None = None
+    regions_path: Path | str | None = None
     extra_env: dict[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -44,6 +45,7 @@ class SASEnv:
             sas_ccfpath=src.get("SAS_CCFPATH"),
             sas_odf=src.get("SAS_ODF"),
             caldb=src.get("CALDB"),
+            regions_path=src.get("XMM_REGIONS_PATH"),
         )
 
     @classmethod
@@ -55,7 +57,7 @@ class SASEnv:
         if not isinstance(env_sec, dict):
             raise ValueError(f"Expected [env] table in {toml_path}")
 
-        known_keys = {attr for attr, _ in _SAS_ENV_KEYS}
+        known_keys = {attr for attr, _ in _SAS_ENV_KEYS} | {"regions_path"}
         extra: dict[str, str] = {}
         for k, v in env_sec.items():
             if k not in known_keys and isinstance(v, (str, int, float, bool)):
@@ -67,6 +69,7 @@ class SASEnv:
             sas_ccfpath=env_sec.get("sas_ccfpath"),
             sas_odf=env_sec.get("sas_odf"),
             caldb=env_sec.get("caldb"),
+            regions_path=env_sec.get("regions_path"),
             extra_env=extra,
         )
 
@@ -79,6 +82,10 @@ class SASEnv:
             val = getattr(self, attr)
             if val is not None and str(val) != "":
                 merged[env_name] = str(val)
+        if self.regions_path is not None and str(self.regions_path).strip():
+            rpath = str(self.regions_path).strip()
+            existing_pp = merged.get("PYTHONPATH", "")
+            merged["PYTHONPATH"] = f"{rpath}:{existing_pp}" if existing_pp else rpath
         for k, v in self.extra_env.items():
             merged[k] = str(v)
         return merged

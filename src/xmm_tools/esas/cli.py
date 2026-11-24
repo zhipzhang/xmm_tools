@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import sys
 
-from xmm_tools.esas.config import ESASConfig
+from xmm_tools.esas.config import ESASConfig, SpectrumRegionSpec
 from xmm_tools.esas.flare import run_flare
 from xmm_tools.esas.init import initialize_observation
 from xmm_tools.esas.quick_image import run_quick_image
 from xmm_tools.esas.source_detect import run_source_detect
+from xmm_tools.esas.spectrum import run_spectrum
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -133,6 +134,58 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run quick imaging even if manifest exists.",
     )
+
+    p_spec = sub.add_parser(
+        "spectrum",
+        help="Extract ESAS spectra & particle backgrounds (mosspectra/pnspectra + mosback/pnback).",
+    )
+    p_spec.add_argument(
+        "--config",
+        default="esas.toml",
+        help="Path to esas.toml (default: ./esas.toml).",
+    )
+    p_spec.add_argument(
+        "--reg",
+        default=None,
+        help="Ad-hoc DS9 .reg (or DET .txt) file to run instead of [spectrum.regions].",
+    )
+    p_spec.add_argument(
+        "--name",
+        default=None,
+        help="Region group name for --reg (defaults to file stem).",
+    )
+    p_spec.add_argument(
+        "--mode",
+        choices=("single", "split", "union"),
+        default="single",
+        help="Handling mode for --reg (default: single).",
+    )
+    p_spec.add_argument(
+        "--only",
+        action="append",
+        default=None,
+        help="Run only matching region group/key (repeatable).",
+    )
+    p_spec.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing manifest entries for --reg.",
+    )
+    p_spec.add_argument(
+        "--docker",
+        default=None,
+        help="Optional Docker container name to run SAS commands inside.",
+    )
+    p_spec.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate config and region expansion without running SAS commands.",
+    )
+    p_spec.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-running all selected regions even if present in manifest.json.",
+    )
     return parser
 
 
@@ -198,6 +251,39 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Manifest:        {res.manifest_path}")
         for band, path in res.band_flux_images.items():
             print(f"  flux[{band}]: {path.name}")
+        return 0
+
+    if args.subcommand == "spectrum":
+        cfg = ESASConfig.from_toml(args.config)
+        ad_hoc = None
+        if args.reg is not None:
+            from pathlib import Path
+
+            reg_name = args.name or Path(args.reg).stem
+            ad_hoc = [
+                SpectrumRegionSpec(
+                    name=reg_name,
+                    file=args.reg,
+                    mode=args.mode,
+                    overwrite=args.overwrite,
+                )
+            ]
+        res = run_spectrum(
+            cfg,
+            regions=ad_hoc,
+            only=args.only,
+            dry_run=args.dry_run,
+            force=args.force,
+            docker_container=args.docker,
+        )
+        print(f"Spectrum dir: {res.spectrum_dir}")
+        print(f"Manifest:     {res.manifest_path} ({len(res.regions)} regions)")
+        for key, reg in sorted(res.regions.items()):
+            summary = ", ".join(
+                f"{inst}:{'skip' if p.skipped else p.event_count}"
+                for inst, p in reg.instruments.items()
+            )
+            print(f"  {key} [{reg.mode}]: {summary}")
         return 0
 
     return 1
