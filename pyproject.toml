@@ -10,14 +10,17 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "astropy>=5.0",
-    "imgui-bundle>=1.90",
     "numpy>=1.24",
 ]
 
 [project.scripts]
 xmm-qdp = "xmm_tools.qdp.gui:main"
+xmm-esas = "xmm_tools.esas.cli:main"
 
 [project.optional-dependencies]
+gui = [
+    "imgui-bundle>=1.90",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4",
