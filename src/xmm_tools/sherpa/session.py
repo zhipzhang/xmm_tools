@@ -161,6 +161,72 @@ class FitReport:
         )
         return out_path
 
+    @classmethod
+    def from_json(cls, path: str | Path) -> FitReport:
+        """Load a ``FitReport`` previously saved by ``save_json()``."""
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        return cls(
+            stat_name=str(raw.get("stat_name", "")),
+            stat_val=float(raw.get("stat_val", 0.0)),
+            dof=int(raw.get("dof", 0)),
+            reduced_stat=float(raw.get("reduced_stat", 0.0)),
+            succeeded=bool(raw.get("succeeded", False)),
+            datasets=dict(raw.get("datasets", {})),
+            components=dict(raw.get("components", {})),
+            message=str(raw.get("message", "")),
+        )
+
+    def params_map(self) -> dict[str, dict[str, Any]]:
+        """Return a flat mapping ``{fullname: param_dict}`` across all components."""
+        out: dict[str, dict[str, Any]] = {}
+        for ds_comps in self.components.values():
+            for plist in ds_comps.values():
+                for p in plist:
+                    out.setdefault(p["fullname"], p)
+        return out
+
+    def component(
+        self,
+        component_name: str,
+        *,
+        region: str | None = None,
+        instrument: str | None = None,
+        full: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        """Return ``{tag: {param_name: val}}`` (or full param dicts if ``full=True``)."""
+        for ds_id, ds_comps in self.components.items():
+            meta = self.datasets.get(ds_id, {})
+            if region is not None and meta.get("region") != region:
+                continue
+            if instrument is not None and meta.get("instrument") != instrument:
+                continue
+            if component_name not in ds_comps:
+                continue
+            grouped: dict[str, dict[str, Any]] = {}
+            for p in ds_comps[component_name]:
+                tag = str(p["model"]).rsplit("__", 1)[-1]
+                grouped.setdefault(tag, {})[p["name"]] = p if full else p["val"]
+            return grouped
+        raise KeyError(
+            f"Component {component_name!r} not found "
+            f"(region={region!r}, instrument={instrument!r})"
+        )
+
+    def get(
+        self,
+        component_name: str,
+        tag: str,
+        param_name: str,
+        *,
+        region: str | None = None,
+        instrument: str | None = None,
+    ) -> float:
+        """Shortcut to read one fitted parameter value from ``FitReport``."""
+        comp = self.component(
+            component_name, region=region, instrument=instrument, full=False
+        )
+        return float(comp[tag][param_name])
+
 
 @dataclass
 class _ComponentSpec:

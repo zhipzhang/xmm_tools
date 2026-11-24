@@ -290,3 +290,18 @@ class TestSherpaOOP(unittest.TestCase):
             )
             self.assertTrue(plot_file.exists() and plot_file.stat().st_size > 0)
             plt.close(fig)
+
+            # Roundtrip FitReport.from_json and explicit component/parameter access
+            from xmm_tools.sherpa import FitReport
+
+            loaded_rep = FitReport.from_json(json_path)
+            self.assertAlmostEqual(loaded_rep.stat_val, report.stat_val, places=6)
+
+            sky_vals = loaded_rep.component("sky_background")
+            self.assertIn("sky", sky_vals)
+            self.assertIn("ampl", sky_vals["sky"])
+            self.assertAlmostEqual(
+                loaded_rep.get("calibration", "cal", "c0", instrument="mos1"),
+                loaded_rep.param("mos1__calibration__cal.c0")["val"],
+                places=6,
+            )

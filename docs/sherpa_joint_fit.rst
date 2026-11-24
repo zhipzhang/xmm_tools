@@ -107,6 +107,11 @@ Complete Joint-Fit Example
    report.print_summary(include_linked=True)
    report.save_json("fit_results/joint_fit.json")
 
+   # Reload saved JSON and access fitted component parameters explicitly
+   # prev = FitReport.from_json("fit_results/joint_fit.json")
+   # sky = prev.component("sky_background")   # -> {"gal": {"nH": ...}, "gh": {"kT": ...}, ...}
+   # kT_gh = prev.get("sky_background", "gh", "kT")
+
    session.plot("east_jet/e4", instrument="mos1", save_path="fit_results/e4_mos1.pdf")
    session.plot("east_jet/e4", instrument=["mos1", "mos2", "pn"], save_path="fit_results/e4_all.png")
 
