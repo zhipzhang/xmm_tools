@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 xmm-qdp = "xmm_tools.qdp.gui:main"
+xmm-img = "xmm_tools.image.gui:main"
 xmm-esas = "xmm_tools.esas.cli:main"
 
 [project.optional-dependencies]
