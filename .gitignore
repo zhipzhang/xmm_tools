@@ -46,3 +46,6 @@ htmlcov/
 *.lc
 *.img
 *.log
+
+# Sphinx build artifacts
+docs/_build/

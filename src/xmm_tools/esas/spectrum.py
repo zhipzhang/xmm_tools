@@ -1,6 +1,7 @@
 """ESAS spectrum extraction (``mosspectra``/``pnspectra`` + ``mosback``/``pnback``).
 
 Workflow per region job:
+
 1. Expand ``SpectrumRegionSpec`` (``single`` / ``split`` / ``union``) from DS9 ``.reg``
    or pre-converted SAS ``DETX/DETY`` ``.txt`` files.
 2. Convert DS9 sky regions to per-instrument ``DETX/DETY`` expressions using
