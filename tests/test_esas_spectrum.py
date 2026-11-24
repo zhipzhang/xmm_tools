@@ -120,6 +120,7 @@ class TestESASSpectrum(unittest.TestCase):
             elif cmd.program == "mosspectra":
                 inst = "mos1S001" if "mos1" in cmd.params["eventfile"] else "mos2S002"
                 _touch(cmd.cwd_path / f"{inst}-fovt.pi")
+                _touch(cmd.cwd_path / f"{inst}-fovimspdet.fits")
                 _touch(cmd.cwd_path / f"{inst}.rmf")
                 _touch(cmd.cwd_path / f"{inst}.arf")
             elif cmd.program == "mosback":
@@ -128,6 +129,7 @@ class TestESASSpectrum(unittest.TestCase):
                 _touch(cmd.cwd_path / f"{prefix}-bkgspec.qdp")
             elif cmd.program == "pnspectra":
                 _touch(cmd.cwd_path / "pnS003-fovt.pi")
+                _touch(cmd.cwd_path / "pnS003-fovimspdet.fits")
                 _touch(cmd.cwd_path / "pnS003-fovtoot.pi")
                 _touch(cmd.cwd_path / "pnS003.rmf")
                 _touch(cmd.cwd_path / "pnS003.arf")
@@ -135,6 +137,13 @@ class TestESASSpectrum(unittest.TestCase):
                 _touch(cmd.cwd_path / "pnS003-bkg.pi")
                 _touch(cmd.cwd_path / "pnS003-fovtootsub.pi")
                 _touch(cmd.cwd_path / "pnS003-bkgspec.qdp")
+            elif cmd.program == "protonscale":
+                log_path.write_text(
+                    "protonscale:-  Area             :    6.25\n"
+                    "protonscale:-  Ave Flux         :    1.5E-05\n"
+                    "protonscale:-  Scaled Ave Flux  :    10.5\n",
+                    encoding="utf-8",
+                )
 
             return RunResult(
                 command=cmd, status="completed", returncode=0, log_path=log_path
@@ -198,6 +207,9 @@ class TestESASSpectrum(unittest.TestCase):
             self.assertEqual(set(loaded.regions.keys()), set(res.regions.keys()))
             self.assertTrue(
                 loaded.regions["east_jet/e1"].instruments["pn"].fovtootsub.exists()
+            )
+            self.assertAlmostEqual(
+                loaded.regions["east_jet/e1"].instruments["mos1"].proton_scale, 10.5
             )
 
     def test_incremental_upsert_and_overwrite(self):

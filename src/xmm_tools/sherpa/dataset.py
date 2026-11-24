@@ -103,6 +103,20 @@ class SpectrumDataset:
     diag_rmf: Any | None = None
     solid_angle: float = 1.0
     exposure: float = 1.0
+    proton_scale: float | None = None
+    proton_area: float | None = None
+    proton_ave_flux: float | None = None
+
+    def proton_ratio(self, ref: SpectrumDataset) -> float:
+        """Return ``self.proton_scale / ref.proton_scale`` for soft-proton scaling."""
+        if self.proton_scale is None or ref.proton_scale is None:
+            raise ValueError(
+                f"proton_scale missing for {self.ds_id!r} or {ref.ds_id!r}; "
+                "run 'xmm-esas spectrum' (protonscale) or check spectrum/manifest.json."
+            )
+        if ref.proton_scale <= 0:
+            raise ValueError(f"Reference proton_scale must be > 0 for {ref.ds_id!r}")
+        return float(self.proton_scale) / float(ref.proton_scale)
 
     @classmethod
     def from_files(
@@ -117,6 +131,9 @@ class SpectrumDataset:
         bkg_path: str | Path | None = None,
         diag_rmf_path: str | Path | None = None,
         use_errors: bool = True,
+        proton_scale: float | None = None,
+        proton_area: float | None = None,
+        proton_ave_flux: float | None = None,
     ) -> SpectrumDataset:
         sh = _require_sherpa()
         pha_p = Path(pha_path)
@@ -158,6 +175,9 @@ class SpectrumDataset:
             diag_rmf=diag_rmf,
             solid_angle=solid_angle,
             exposure=exposure,
+            proton_scale=proton_scale,
+            proton_area=proton_area,
+            proton_ave_flux=proton_ave_flux,
         )
 
     def notice(self, emin: float | None = None, emax: float | None = None) -> SpectrumDataset:
@@ -245,6 +265,9 @@ class SpectrumCollection:
                     bkg_path=prod.bkg,
                     diag_rmf_path=diag_map.get(inst),
                     use_errors=use_errors,
+                    proton_scale=prod.proton_scale,
+                    proton_area=prod.proton_area,
+                    proton_ave_flux=prod.proton_ave_flux,
                 )
         return cls(datasets=loaded)
 

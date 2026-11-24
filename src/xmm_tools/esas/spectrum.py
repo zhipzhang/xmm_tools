@@ -39,6 +39,9 @@ from xmm_tools.sas.runner import SASRunner
 DET_SCALE = 20.0
 _NUMBER_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?"
 _ECOORD_RE = re.compile(rf"DETX:\s*DETY:\s*({_NUMBER_RE})\s+({_NUMBER_RE})")
+_PROTON_AREA_RE = re.compile(rf"Area\s*:\s*({_NUMBER_RE})")
+_PROTON_FLUX_RE = re.compile(rf"Ave Flux\s*:\s*({_NUMBER_RE})")
+_PROTON_SCALED_RE = re.compile(rf"Scaled Ave Flux\s*:\s*({_NUMBER_RE})")
 _QDP_KEYS = ("bkgspec", "augspec", "ratehard")
 
 
@@ -55,6 +58,9 @@ class InstrumentProducts:
     qdp_plots: dict[str, Path] = field(default_factory=dict)
     region_file: Path | None = None
     event_count: int | None = None
+    proton_area: float | None = None
+    proton_ave_flux: float | None = None
+    proton_scale: float | None = None
     skipped: bool = False
     skip_reason: str = ""
 
@@ -83,6 +89,9 @@ class InstrumentProducts:
             "qdp_plots": {k: _rel(v) for k, v in self.qdp_plots.items()},
             "region_file": _rel(self.region_file),
             "event_count": self.event_count,
+            "proton_area": self.proton_area,
+            "proton_ave_flux": self.proton_ave_flux,
+            "proton_scale": self.proton_scale,
             "skipped": self.skipped,
             "skip_reason": self.skip_reason,
         }
@@ -106,6 +115,9 @@ class InstrumentProducts:
             qdp_plots={k: p for k, v in qdp_raw.items() if (p := _abs(v)) is not None},
             region_file=_abs(raw.get("region_file")),
             event_count=raw.get("event_count"),
+            proton_area=raw.get("proton_area"),
+            proton_ave_flux=raw.get("proton_ave_flux"),
+            proton_scale=raw.get("proton_scale"),
             skipped=bool(raw.get("skipped", False)),
             skip_reason=str(raw.get("skip_reason", "")),
         )
@@ -577,11 +589,52 @@ def _find_prefix(region_dir: Path, inst: str) -> str:
     return defaults[inst]
 
 
+def _run_protonscale(
+    region_dir: Path,
+    prefix: str,
+    inst: str,
+    runner: SASRunner,
+    *,
+    force: bool,
+) -> tuple[float | None, float | None, float | None]:
+    """Run ``protonscale`` on ``<prefix>-fovimspdet.fits`` and ``<prefix>-fovt.pi``."""
+    mask_name = f"{prefix}-fovimspdet.fits"
+    spec_name = f"{prefix}-fovt.pi"
+    if not (region_dir / mask_name).exists() or not (region_dir / spec_name).exists():
+        return None, None, None
+    res = runner.run(
+        SASCommand(
+            program="protonscale",
+            cwd=region_dir,
+            params={"mode": 1, "maskfile": mask_name, "specfile": spec_name},
+            core_outputs=[],
+            intermediate_dir=None,
+            log_file=f"protonscale_{inst}.log",
+        ),
+        force=force,
+    )
+    if res.status == "dry_run" or res.log_path is None or not res.log_path.exists():
+        return None, None, None
+    text = res.log_path.read_text(encoding="utf-8", errors="replace")
+    m_area = _PROTON_AREA_RE.search(text)
+    m_flux = _PROTON_FLUX_RE.search(text)
+    m_scaled = _PROTON_SCALED_RE.search(text)
+    return (
+        float(m_area.group(1)) if m_area else None,
+        float(m_flux.group(1)) if m_flux else None,
+        float(m_scaled.group(1)) if m_scaled else None,
+    )
+
+
 def _collect_instrument_products(
     region_dir: Path,
     inst: str,
     reg_txt: Path,
     count: int,
+    *,
+    proton_area: float | None = None,
+    proton_ave_flux: float | None = None,
+    proton_scale: float | None = None,
 ) -> InstrumentProducts:
     prefix = _find_prefix(region_dir, inst)
 
@@ -602,6 +655,9 @@ def _collect_instrument_products(
         qdp_plots=qdp_plots,
         region_file=reg_txt,
         event_count=count,
+        proton_area=proton_area,
+        proton_ave_flux=proton_ave_flux,
+        proton_scale=proton_scale,
         skipped=False,
     )
 
@@ -794,8 +850,17 @@ def _run_single_region_job(
                 force=force,
             )
 
+        p_area, p_flux, p_scaled = _run_protonscale(
+            rdir, prefix, inst, runner, force=force
+        )
         inst_results[inst] = _collect_instrument_products(
-            rdir, inst, expr_files[inst], count
+            rdir,
+            inst,
+            expr_files[inst],
+            count,
+            proton_area=p_area,
+            proton_ave_flux=p_flux,
+            proton_scale=p_scaled,
         )
 
     if not dry_run:

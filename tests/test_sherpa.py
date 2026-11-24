@@ -167,6 +167,7 @@ class TestSherpaOOP(unittest.TestCase):
                                 rmf=bkg_files_m1["rmf"],
                                 arf=bkg_files_m1["arf"],
                                 event_count=100,
+                                proton_scale=80.0,
                             ),
                             "pn": InstrumentProducts(
                                 fovtootsub=bkg_files_pn["pha"],
@@ -174,6 +175,7 @@ class TestSherpaOOP(unittest.TestCase):
                                 rmf=bkg_files_pn["rmf"],
                                 arf=bkg_files_pn["arf"],
                                 event_count=100,
+                                proton_scale=70.0,
                             ),
                         },
                     ),
@@ -193,6 +195,7 @@ class TestSherpaOOP(unittest.TestCase):
                                 rmf=src_files_m1["rmf"],
                                 arf=src_files_m1["arf"],
                                 event_count=50,
+                                proton_scale=10.0,
                             ),
                             "pn": InstrumentProducts(
                                 skipped=True,
@@ -209,6 +212,11 @@ class TestSherpaOOP(unittest.TestCase):
             self.assertEqual(len(col), 3)
             self.assertAlmostEqual(col["background", "mos1"].solid_angle, 1.0, places=4)
             self.assertAlmostEqual(col["east_jet/e4", "mos1"].solid_angle, 0.5, places=4)
+            self.assertAlmostEqual(
+                col["east_jet/e4", "mos1"].proton_ratio(col["background", "mos1"]),
+                0.125,
+                places=5,
+            )
 
             col.notice(0.5, 2.0)
 
@@ -234,8 +242,9 @@ class TestSherpaOOP(unittest.TestCase):
                     regions=["east_jet/e4"],
                 )
                 .set_soft_proton(
-                    lambda m: m.powlaw1d("sp", gamma=0.8, ampl=1e-3),
+                    lambda m: m.powlaw1d("sp", gamma=0.8, ampl=1e-4),
                     scope="dataset",
+                    use_proton_scale=True,
                 )
                 .set_instrument_lines(
                     lambda m, ds: (

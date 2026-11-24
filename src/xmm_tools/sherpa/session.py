@@ -169,6 +169,7 @@ class _ComponentSpec:
     scope: str
     regions: set[str] | None = None
     per_arcmin2: bool = False
+    use_proton_scale: bool = False
     response: str = "sky"
 
 
@@ -191,6 +192,7 @@ class JointFitSession:
         scope: str,
         regions: Iterable[str] | None = None,
         per_arcmin2: bool = False,
+        use_proton_scale: bool = False,
         response: str = "sky",
     ) -> JointFitSession:
         if scope not in VALID_SCOPES:
@@ -201,6 +203,7 @@ class JointFitSession:
             scope=scope,
             regions=set(regions) if regions is not None else None,
             per_arcmin2=per_arcmin2,
+            use_proton_scale=use_proton_scale,
             response=response,
         )
         return self
@@ -251,6 +254,7 @@ class JointFitSession:
         sp: Any,
         *,
         scope: str = "dataset",
+        use_proton_scale: bool = False,
         regions: Iterable[str] | None = None,
     ) -> JointFitSession:
         return self._register(
@@ -258,6 +262,7 @@ class JointFitSession:
             sp,
             scope=scope,
             regions=regions,
+            use_proton_scale=use_proton_scale,
             response="diagonal",
         )
 
@@ -340,7 +345,16 @@ class JointFitSession:
                 celestial = cal * sky_sum if cal is not None else sky_sum
                 folded_terms.append(ds.fold_sky(celestial))
             if sp is not None:
-                folded_terms.append(ds.fold_diagonal(sp))
+                c_sp = self._specs["soft_proton"]
+                if c_sp.use_proton_scale:
+                    if ds.proton_scale is None:
+                        raise ValueError(
+                            f"use_proton_scale=True requires proton_scale on {ds.ds_id!r}."
+                        )
+                    sp_term = ds.proton_scale * sp
+                else:
+                    sp_term = sp
+                folded_terms.append(ds.fold_diagonal(sp_term))
             if inst is not None:
                 c_inst = self._specs["instrument_lines"]
                 if c_inst.response == "unit_arf":
@@ -383,7 +397,12 @@ class JointFitSession:
             out["source_emission"] = ds.fold_sky(cal * term if cal is not None else term)
 
         if (sp := assigned.get("soft_proton")) is not None:
-            out["soft_proton"] = ds.fold_diagonal(sp)
+            sp_term = (
+                ds.proton_scale * sp
+                if self._specs["soft_proton"].use_proton_scale and ds.proton_scale is not None
+                else sp
+            )
+            out["soft_proton"] = ds.fold_diagonal(sp_term)
 
         if (inst := assigned.get("instrument_lines")) is not None:
             if self._specs["instrument_lines"].response == "unit_arf":
@@ -536,6 +555,7 @@ class JointFitSession:
                 "region": ds.region_key,
                 "instrument": ds.instrument,
                 "solid_angle_arcmin2": ds.solid_angle,
+                "proton_scale": ds.proton_scale,
                 "exposure_s": ds.exposure,
                 "pha": str(ds.pha_path),
             }
