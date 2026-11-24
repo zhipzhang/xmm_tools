@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
-import re
 from typing import Literal, Sequence
 
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+from astropy.wcs import WCS
+import regions as astropy_regions
 
 from xmm_tools.image.fits_io import FitsImageData, sky_to_pixel
 
@@ -38,7 +39,29 @@ class BoxRegion:
     include: bool = True
 
 
-RegionItem = CircleRegion | BoxRegion
+@dataclass
+class EllipseRegion:
+    """Elliptical region in FK5 sky coordinates (semi-axes in arcsec)."""
+
+    name: str
+    ra_deg: float
+    dec_deg: float
+    semi_major_arcsec: float
+    semi_minor_arcsec: float
+    angle_deg: float = 0.0
+    include: bool = True
+
+
+@dataclass
+class PolygonRegion:
+    """Polygonal region in FK5 sky coordinates ``[(ra_deg, dec_deg), ...]``."""
+
+    name: str
+    vertices_deg: list[tuple[float, float]]
+    include: bool = True
+
+
+RegionItem = CircleRegion | BoxRegion | EllipseRegion | PolygonRegion
 
 
 @dataclass
@@ -194,6 +217,48 @@ def resize_box_edge(
     return box
 
 
+def ellipse_outline_pixels(
+    ellipse: EllipseRegion, img: FitsImageData, *, n_pts: int = 48
+) -> list[tuple[float, float]] | None:
+    """Sample an ``EllipseRegion`` boundary in 0-based pixel coordinates."""
+    if img.wcs is None:
+        return None
+    center = SkyCoord(
+        ra=ellipse.ra_deg * u.deg, dec=ellipse.dec_deg * u.deg, frame="fk5"
+    )
+    pa_major = (90.0 - ellipse.angle_deg) * u.deg
+    pa_minor = (180.0 - ellipse.angle_deg) * u.deg
+    pts: list[tuple[float, float]] = []
+    for i in range(n_pts):
+        theta = 2.0 * math.pi * i / n_pts
+        pt = center.directional_offset_by(
+            pa_major, ellipse.semi_major_arcsec * math.cos(theta) * u.arcsec
+        )
+        pt = pt.directional_offset_by(
+            pa_minor, ellipse.semi_minor_arcsec * math.sin(theta) * u.arcsec
+        )
+        px = sky_to_pixel(img, float(pt.ra.deg), float(pt.dec.deg))
+        if px is None:
+            return None
+        pts.append(px)
+    return pts
+
+
+def polygon_pixels(
+    poly: PolygonRegion, img: FitsImageData
+) -> list[tuple[float, float]] | None:
+    """Convert a ``PolygonRegion``'s sky vertices to 0-based pixel coordinates."""
+    if img.wcs is None:
+        return None
+    pts: list[tuple[float, float]] = []
+    for ra, dec in poly.vertices_deg:
+        px = sky_to_pixel(img, ra, dec)
+        if px is None:
+            return None
+        pts.append(px)
+    return pts
+
+
 def export_ds9_regions(
     regions: Sequence[RegionItem],
     path: str | Path,
@@ -219,74 +284,82 @@ def export_ds9_regions(
                 f'{reg.width_arcsec:.3f}",{reg.height_arcsec:.3f}",{reg.angle_deg:.3f}) '
                 f"# text={{{reg.name}}}"
             )
+        elif isinstance(reg, EllipseRegion):
+            lines.append(
+                f'{prefix}ellipse({reg.ra_deg:.7f},{reg.dec_deg:.7f},'
+                f'{reg.semi_major_arcsec:.3f}",{reg.semi_minor_arcsec:.3f}",{reg.angle_deg:.3f}) '
+                f"# text={{{reg.name}}}"
+            )
+        elif isinstance(reg, PolygonRegion):
+            coords = ",".join(
+                f"{ra:.7f},{dec:.7f}" for ra, dec in reg.vertices_deg
+            )
+            lines.append(f"{prefix}polygon({coords}) # text={{{reg.name}}}")
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out_path
 
 
-_CIRCLE_RE = re.compile(
-    r'^(-?)circle\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)"]+)"?\s*\)(.*)$',
-    re.IGNORECASE,
-)
-_BOX_RE = re.compile(
-    r'^(-?)box\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,"]+)"?\s*,\s*([^,"]+)"?\s*,\s*([^)]+)\s*\)(.*)$',
-    re.IGNORECASE,
-)
-_TEXT_RE = re.compile(r"text=\s*\{([^}]*)\}")
-
-
-def _parse_arcsec(val: str) -> float:
-    s = val.strip()
-    if s.endswith('"'):
-        return float(s[:-1])
-    if s.endswith("'"):
-        return float(s[:-1]) * 60.0
-    return float(s)
-
-
-def parse_ds9_regions(path: str | Path) -> list[RegionItem]:
-    """Parse ``circle(...)`` and ``box(...)`` entries from an FK5 DS9 ``.reg`` file."""
-    text = Path(path).read_text(encoding="utf-8", errors="replace")
+def parse_ds9_regions(
+    path: str | Path, *, wcs: WCS | None = None
+) -> list[RegionItem]:
+    """Parse circle, box, ellipse, and polygon regions from a DS9 ``.reg`` file."""
+    parsed = astropy_regions.Regions.read(Path(path), format="ds9")
     items: list[RegionItem] = []
-    idx = 1
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or line.lower().startswith("global"):
-            continue
-        if line.lower() in ("fk5", "icrs", "image", "physical"):
-            continue
 
-        m_circ = _CIRCLE_RE.match(line)
-        if m_circ:
-            neg, ra_s, dec_s, rad_s, rest = m_circ.groups()
-            tmatch = _TEXT_RE.search(rest)
-            name = tmatch.group(1) if tmatch else f"reg{idx}"
+    for idx, reg in enumerate(parsed, 1):
+        if isinstance(reg, astropy_regions.PixelRegion):
+            if wcs is None:
+                continue
+            reg = reg.to_sky(wcs)
+
+        include = bool(reg.meta.get("include", 1))
+        name = str(reg.meta.get("text") or f"reg{idx}")
+
+        if isinstance(reg, astropy_regions.CircleSkyRegion):
+            fk5 = reg.center.fk5
             items.append(
                 CircleRegion(
                     name=name,
-                    ra_deg=float(ra_s),
-                    dec_deg=float(dec_s),
-                    radius_arcsec=_parse_arcsec(rad_s),
-                    include=(neg != "-"),
+                    ra_deg=float(fk5.ra.deg),
+                    dec_deg=float(fk5.dec.deg),
+                    radius_arcsec=float(reg.radius.to_value(u.arcsec)),
+                    include=include,
                 )
             )
-            idx += 1
-            continue
-
-        m_box = _BOX_RE.match(line)
-        if m_box:
-            neg, ra_s, dec_s, w_s, h_s, ang_s, rest = m_box.groups()
-            tmatch = _TEXT_RE.search(rest)
-            name = tmatch.group(1) if tmatch else f"reg{idx}"
+        elif isinstance(reg, astropy_regions.RectangleSkyRegion):
+            fk5 = reg.center.fk5
             items.append(
                 BoxRegion(
                     name=name,
-                    ra_deg=float(ra_s),
-                    dec_deg=float(dec_s),
-                    width_arcsec=_parse_arcsec(w_s),
-                    height_arcsec=_parse_arcsec(h_s),
-                    angle_deg=float(ang_s),
-                    include=(neg != "-"),
+                    ra_deg=float(fk5.ra.deg),
+                    dec_deg=float(fk5.dec.deg),
+                    width_arcsec=float(reg.width.to_value(u.arcsec)),
+                    height_arcsec=float(reg.height.to_value(u.arcsec)),
+                    angle_deg=float(reg.angle.to_value(u.deg)),
+                    include=include,
                 )
             )
-            idx += 1
+        elif isinstance(reg, astropy_regions.EllipseSkyRegion):
+            fk5 = reg.center.fk5
+            items.append(
+                EllipseRegion(
+                    name=name,
+                    ra_deg=float(fk5.ra.deg),
+                    dec_deg=float(fk5.dec.deg),
+                    semi_major_arcsec=0.5 * float(reg.width.to_value(u.arcsec)),
+                    semi_minor_arcsec=0.5 * float(reg.height.to_value(u.arcsec)),
+                    angle_deg=float(reg.angle.to_value(u.deg)),
+                    include=include,
+                )
+            )
+        elif isinstance(reg, astropy_regions.PolygonSkyRegion):
+            fk5 = reg.vertices.fk5
+            verts = [
+                (float(ra), float(dec))
+                for ra, dec in zip(fk5.ra.deg, fk5.dec.deg)
+            ]
+            items.append(
+                PolygonRegion(name=name, vertices_deg=verts, include=include)
+            )
+
     return items

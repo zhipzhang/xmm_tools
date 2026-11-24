@@ -21,6 +21,7 @@ xmm-esas = "xmm_tools.esas.cli:main"
 [project.optional-dependencies]
 gui = [
     "imgui-bundle>=1.90",
+    "regions>=0.9",
 ]
 dev = [
     "pytest>=7.0",

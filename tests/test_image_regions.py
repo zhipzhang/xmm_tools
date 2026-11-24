@@ -12,13 +12,17 @@ import numpy as np
 
 from xmm_tools.image import (
     CircleRegion,
+    EllipseRegion,
+    PolygonRegion,
     StripGridParams,
     box_corners_pixels,
+    ellipse_outline_pixels,
     export_ds9_regions,
     generate_strip_grid,
     load_fits_image,
     parse_ds9_regions,
     pixel_to_sky,
+    polygon_pixels,
     resize_box_edge,
     sky_to_pixel,
     smooth_image,
@@ -110,12 +114,26 @@ class TestFitsImageAndRegions(unittest.TestCase):
             self.assertEqual(derived.count, 4)
 
             reg_path = root / "test.reg"
-            all_regs = [*boxes, CircleRegion("src", 287.956, 4.982, 30.0, include=False)]
+            all_regs = [
+                *boxes,
+                CircleRegion("src", 287.956, 4.982, 30.0, include=False),
+                EllipseRegion("ell1", 287.96, 4.98, 25.0, 12.0, angle_deg=30.0),
+                PolygonRegion(
+                    "poly1",
+                    [(287.95, 4.97), (287.96, 4.97), (287.96, 4.99)],
+                ),
+            ]
             export_ds9_regions(all_regs, reg_path)
-            parsed = parse_ds9_regions(reg_path)
-            self.assertEqual(len(parsed), 5)
+            parsed = parse_ds9_regions(reg_path, wcs=img.wcs)
+            self.assertEqual(len(parsed), 7)
             self.assertEqual(parsed[0].name, "e1")
-            self.assertFalse(parsed[-1].include)
+            self.assertFalse(parsed[4].include)
+            self.assertIsInstance(parsed[5], EllipseRegion)
+            self.assertAlmostEqual(parsed[5].semi_major_arcsec, 25.0, places=2)
+            self.assertIsInstance(parsed[6], PolygonRegion)
+            self.assertEqual(len(parsed[6].vertices_deg), 3)
+            self.assertEqual(len(ellipse_outline_pixels(parsed[5], img)), 48)
+            self.assertEqual(len(polygon_pixels(parsed[6], img)), 3)
 
     def test_viewer_state_load_and_apply_strip(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,6 +146,17 @@ class TestFitsImageAndRegions(unittest.TestCase):
             state.strip_params.count = 3
             state.apply_strip_grid(replace=True)
             self.assertEqual(len(state.regions), 3)
+
+            # Manual region addition (Circle, Box, Ellipse, Polygon)
+            state.add_shape_idx = 0
+            state.add_manual_region_at(287.956, 4.982)
+            state.add_shape_idx = 1
+            state.add_manual_region_at(287.956, 4.982)
+            state.add_shape_idx = 2
+            state.add_manual_region_at(287.956, 4.982)
+            state.poly_draft_vertices = [(287.95, 4.97), (287.96, 4.97), (287.96, 4.99)]
+            state.finish_polygon_draft()
+            self.assertEqual(len(state.regions), 7)
 
     def test_resize_box_edge_single_side_stretch(self):
         params = StripGridParams(

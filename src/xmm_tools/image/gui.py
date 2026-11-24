@@ -29,12 +29,16 @@ from xmm_tools.image.fits_io import (
 from xmm_tools.image.regions import (
     BoxRegion,
     CircleRegion,
+    EllipseRegion,
+    PolygonRegion,
     RegionItem,
     StripGridParams,
     box_corners_pixels,
+    ellipse_outline_pixels,
     export_ds9_regions,
     generate_strip_grid,
     parse_ds9_regions,
+    polygon_pixels,
     resize_box_edge,
     strip_params_from_sky_points,
 )
@@ -106,6 +110,17 @@ class ImageViewerState:
     preview_strip: bool = True
     strip_end_sky: tuple[float, float] | None = None
     selected_region_idx: int | None = None
+    add_shape_idx: int = 0  # 0=Circle, 1=Box, 2=Ellipse, 3=Polygon
+    add_name: str = ""
+    add_include: bool = True
+    add_radius_arcsec: float = 30.0
+    add_width_arcsec: float = 40.0
+    add_height_arcsec: float = 40.0
+    add_semi_major_arcsec: float = 35.0
+    add_semi_minor_arcsec: float = 20.0
+    add_angle_deg: float = 0.0
+    placing_region: bool = False
+    poly_draft_vertices: list[tuple[float, float]] = field(default_factory=list)
     strip_params: StripGridParams = field(
         default_factory=lambda: StripGridParams(
             start_ra_deg=0.0,
@@ -237,6 +252,66 @@ class ImageViewerState:
         else:
             self.regions.extend(boxes)
 
+    def add_manual_region_at(self, ra_deg: float, dec_deg: float) -> None:
+        """Create and append a Circle, Box, or Ellipse at ``(ra_deg, dec_deg)``."""
+        idx = len(self.regions) + 1
+        shape = self.add_shape_idx
+        if shape == 0:
+            name = self.add_name.strip() or f"c{idx}"
+            self.regions.append(
+                CircleRegion(
+                    name=name,
+                    ra_deg=ra_deg,
+                    dec_deg=dec_deg,
+                    radius_arcsec=self.add_radius_arcsec,
+                    include=self.add_include,
+                )
+            )
+        elif shape == 1:
+            name = self.add_name.strip() or f"b{idx}"
+            self.regions.append(
+                BoxRegion(
+                    name=name,
+                    ra_deg=ra_deg,
+                    dec_deg=dec_deg,
+                    width_arcsec=self.add_width_arcsec,
+                    height_arcsec=self.add_height_arcsec,
+                    angle_deg=self.add_angle_deg,
+                    include=self.add_include,
+                )
+            )
+        elif shape == 2:
+            name = self.add_name.strip() or f"e{idx}"
+            self.regions.append(
+                EllipseRegion(
+                    name=name,
+                    ra_deg=ra_deg,
+                    dec_deg=dec_deg,
+                    semi_major_arcsec=self.add_semi_major_arcsec,
+                    semi_minor_arcsec=self.add_semi_minor_arcsec,
+                    angle_deg=self.add_angle_deg,
+                    include=self.add_include,
+                )
+            )
+        self.selected_region_idx = len(self.regions) - 1
+
+    def finish_polygon_draft(self) -> None:
+        """Commit collected polygon vertices as a ``PolygonRegion``."""
+        if len(self.poly_draft_vertices) < 3:
+            return
+        idx = len(self.regions) + 1
+        name = self.add_name.strip() or f"p{idx}"
+        self.regions.append(
+            PolygonRegion(
+                name=name,
+                vertices_deg=list(self.poly_draft_vertices),
+                include=self.add_include,
+            )
+        )
+        self.poly_draft_vertices.clear()
+        self.placing_region = False
+        self.selected_region_idx = len(self.regions) - 1
+
 
 def _draw_toolbar(state: ImageViewerState) -> None:
     if imgui.button("Open FITS..."):
@@ -289,7 +364,8 @@ def _draw_toolbar(state: ImageViewerState) -> None:
         state.open_reg_dialog = None
         if sel:
             try:
-                state.regions.extend(parse_ds9_regions(sel[0]))
+                wcs = state.image.wcs if state.image is not None else None
+                state.regions.extend(parse_ds9_regions(sel[0], wcs=wcs))
                 state.error_message = ""
             except Exception as exc:  # noqa: BLE001
                 state.error_message = f"Failed to import regions: {exc}"
@@ -308,6 +384,55 @@ def _draw_toolbar(state: ImageViewerState) -> None:
         imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.35, 1.0), state.error_message)
 
 
+def _draw_selected_region_editor(state: ImageViewerState) -> None:
+    """Render live parameter editors for the currently selected region."""
+    idx = state.selected_region_idx
+    if idx is None or not (0 <= idx < len(state.regions)):
+        return
+    reg = state.regions[idx]
+
+    imgui.separator_text(f"Edit Selected: {reg.name}")
+    _, reg.name = imgui.input_text("Name##edit_name", reg.name)
+    _, reg.include = imgui.checkbox("Include (off = Exclude -)##edit_inc", reg.include)
+
+    if isinstance(reg, CircleRegion):
+        _, reg.radius_arcsec = imgui.slider_float(
+            "Radius (\")##edit_r", reg.radius_arcsec, 2.0, 400.0, "%.1f"
+        )
+        _, reg.ra_deg = imgui.input_double("RA (deg)##edit_cra", reg.ra_deg, 0.0, 0.0, "%.6f")
+        _, reg.dec_deg = imgui.input_double("Dec (deg)##edit_cdec", reg.dec_deg, 0.0, 0.0, "%.6f")
+    elif isinstance(reg, BoxRegion):
+        _, reg.width_arcsec = imgui.slider_float(
+            "Width (\")##edit_bw", reg.width_arcsec, 2.0, 400.0, "%.1f"
+        )
+        _, reg.height_arcsec = imgui.slider_float(
+            "Height (\")##edit_bh", reg.height_arcsec, 2.0, 600.0, "%.1f"
+        )
+        _, reg.angle_deg = imgui.slider_float(
+            "Angle (deg)##edit_ba", reg.angle_deg, 0.0, 360.0, "%.1f"
+        )
+        if imgui.tree_node("Center Coords##edit_bcoords"):
+            _, reg.ra_deg = imgui.input_double("RA##edit_bra", reg.ra_deg, 0.0, 0.0, "%.6f")
+            _, reg.dec_deg = imgui.input_double("Dec##edit_bdec", reg.dec_deg, 0.0, 0.0, "%.6f")
+            imgui.tree_pop()
+    elif isinstance(reg, EllipseRegion):
+        _, reg.semi_major_arcsec = imgui.slider_float(
+            "Semi-Major (\")##edit_ea", reg.semi_major_arcsec, 2.0, 400.0, "%.1f"
+        )
+        _, reg.semi_minor_arcsec = imgui.slider_float(
+            "Semi-Minor (\")##edit_eb", reg.semi_minor_arcsec, 2.0, 400.0, "%.1f"
+        )
+        _, reg.angle_deg = imgui.slider_float(
+            "Angle (deg)##edit_eang", reg.angle_deg, 0.0, 360.0, "%.1f"
+        )
+        if imgui.tree_node("Center Coords##edit_ecoords"):
+            _, reg.ra_deg = imgui.input_double("RA##edit_era", reg.ra_deg, 0.0, 0.0, "%.6f")
+            _, reg.dec_deg = imgui.input_double("Dec##edit_edec", reg.dec_deg, 0.0, 0.0, "%.6f")
+            imgui.tree_pop()
+    elif isinstance(reg, PolygonRegion):
+        imgui.text_disabled(f"Vertices: {len(reg.vertices_deg)}")
+
+
 def _draw_sidebar(state: ImageViewerState) -> None:
     if state.image is None:
         imgui.text_wrapped("Open a FITS flux/count image to adjust display & generate regions.")
@@ -317,9 +442,10 @@ def _draw_sidebar(state: ImageViewerState) -> None:
     ny, nx = img.shape
     fname = img.path.name if img.path else "<memory>"
     imgui.text(f"File: {fname}")
-    imgui.text(f"Size: {nx} x {ny}  |  Scale: {img.pixel_scale_arcsec:.2f}\"/pix")
-    imgui.text(f"WCS: {'FK5 Celestial' if img.wcs is not None else 'None (pixel)'}")
-    imgui.separator()
+    imgui.text_disabled(
+        f"{nx}x{ny} px  |  {img.pixel_scale_arcsec:.2f}\"/px  |  "
+        f"{'WCS: FK5' if img.wcs is not None else 'No WCS'}"
+    )
 
     if imgui.collapsing_header("Display & Colorbar", imgui.TreeNodeFlags_.default_open):
         cmap_names = [name for name, _ in _COLORMAPS]
@@ -332,10 +458,10 @@ def _draw_sidebar(state: ImageViewerState) -> None:
             state.stretch_idx = new_s
 
         _, state.smooth_arcsec = imgui.slider_float(
-            "Smooth sigma (\")", state.smooth_arcsec, 0.0, 30.0, "%.1f"
+            "Smooth (\")", state.smooth_arcsec, 0.0, 30.0, "%.1f"
         )
 
-        if imgui.button("Auto Scale (1-99.5%)"):
+        if imgui.button("Auto Scale"):
             state.auto_limits = True
             state.manual_limits = False
         imgui.same_line()
@@ -354,10 +480,11 @@ def _draw_sidebar(state: ImageViewerState) -> None:
             state.vmax = max(new_max, state.vmin + 1e-12)
             state.manual_limits = True
 
-    if imgui.collapsing_header("Strip Grid (Drag Handles on Image)", imgui.TreeNodeFlags_.default_open):
+    if imgui.collapsing_header("Strip Grid Generator", imgui.TreeNodeFlags_.default_open):
         sp = state.strip_params
-        _, state.preview_strip = imgui.checkbox("Show Draggable Strip", state.preview_strip)
-        imgui.text_disabled("Drag cyan (start) & yellow (end) dots on image")
+        _, state.preview_strip = imgui.checkbox("Show Strip Handles", state.preview_strip)
+        imgui.same_line()
+        imgui.text_disabled("(drag dots on image)")
 
         _, sp.width_arcsec = imgui.slider_float("Bin Width (\")", sp.width_arcsec, 4.0, 200.0, "%.1f")
         _, sp.height_arcsec = imgui.slider_float("Bin Height (\")", sp.height_arcsec, 4.0, 400.0, "%.1f")
@@ -365,18 +492,18 @@ def _draw_sidebar(state: ImageViewerState) -> None:
         _, sp.count = imgui.slider_int("Count", sp.count, 1, 40)
         _, sp.prefix = imgui.input_text("Prefix", sp.prefix)
 
-        if imgui.tree_node("Fine-tune Coordinates"):
+        if imgui.tree_node("Axis Coordinates"):
             ch_ra, sp.start_ra_deg = imgui.input_double("Start RA", sp.start_ra_deg, 0.0, 0.0, "%.6f")
             ch_dec, sp.start_dec_deg = imgui.input_double("Start Dec", sp.start_dec_deg, 0.0, 0.0, "%.6f")
-            ch_pa, sp.pa_deg = imgui.slider_float("PA (deg E of N)", sp.pa_deg, 0.0, 360.0, "%.1f")
+            ch_pa, sp.pa_deg = imgui.slider_float("PA (deg)", sp.pa_deg, 0.0, 360.0, "%.1f")
             if ch_ra or ch_dec or ch_pa:
                 state.strip_end_sky = None
             imgui.tree_pop()
 
-        if imgui.button("Append to Regions"):
+        if imgui.button("Append Strip"):
             state.apply_strip_grid(replace=False)
         imgui.same_line()
-        if imgui.button("Replace Regions"):
+        if imgui.button("Replace All"):
             state.apply_strip_grid(replace=True)
 
     if imgui.collapsing_header(
@@ -400,23 +527,115 @@ def _draw_sidebar(state: ImageViewerState) -> None:
             state.regions.clear()
             state.selected_region_idx = None
 
-        to_remove: int | None = None
-        for idx, reg in enumerate(state.regions):
-            is_sel = state.selected_region_idx == idx
-            if isinstance(reg, BoxRegion):
-                desc = f"{reg.name}  [{reg.width_arcsec:.0f}\"x{reg.height_arcsec:.0f}\"]"
+        imgui.separator_text("Add Region")
+        shapes = ["Circle", "Box", "Ellipse", "Polygon"]
+        imgui.set_next_item_width(120.0)
+        ch_sh, new_sh = imgui.combo("Shape", state.add_shape_idx, shapes)
+        if ch_sh:
+            state.add_shape_idx = new_sh
+            state.poly_draft_vertices.clear()
+        imgui.same_line()
+        _, state.add_include = imgui.checkbox("Include", state.add_include)
+        _, state.add_name = imgui.input_text("Label", state.add_name)
+
+        if state.add_shape_idx == 0:
+            _, state.add_radius_arcsec = imgui.slider_float(
+                "Radius (\")", state.add_radius_arcsec, 2.0, 300.0, "%.1f"
+            )
+        elif state.add_shape_idx == 1:
+            _, state.add_width_arcsec = imgui.slider_float(
+                "Box W (\")", state.add_width_arcsec, 2.0, 400.0, "%.1f"
+            )
+            _, state.add_height_arcsec = imgui.slider_float(
+                "Box H (\")", state.add_height_arcsec, 2.0, 400.0, "%.1f"
+            )
+            _, state.add_angle_deg = imgui.slider_float(
+                "Angle (deg)", state.add_angle_deg, 0.0, 360.0, "%.1f"
+            )
+        elif state.add_shape_idx == 2:
+            _, state.add_semi_major_arcsec = imgui.slider_float(
+                "Semi-Major (\")", state.add_semi_major_arcsec, 2.0, 300.0, "%.1f"
+            )
+            _, state.add_semi_minor_arcsec = imgui.slider_float(
+                "Semi-Minor (\")", state.add_semi_minor_arcsec, 2.0, 300.0, "%.1f"
+            )
+            _, state.add_angle_deg = imgui.slider_float(
+                "Angle (deg)", state.add_angle_deg, 0.0, 360.0, "%.1f"
+            )
+
+        if state.add_shape_idx < 3:
+            if state.placing_region:
+                if imgui.button("Cancel Place"):
+                    state.placing_region = False
+                imgui.same_line()
+                imgui.text_colored(imgui.ImVec4(1.0, 0.85, 0.2, 1.0), "Click on image")
             else:
-                desc = f"{reg.name}  [r={reg.radius_arcsec:.0f}\"]"
-            clicked, _ = imgui.selectable(f"{desc}##sel_{idx}", is_sel, imgui.SelectableFlags_.allow_overlap)
-            if clicked:
-                state.selected_region_idx = None if is_sel else idx
-            imgui.same_line()
-            if imgui.small_button(f"X##del_{idx}"):
-                to_remove = idx
-        if to_remove is not None:
-            state.regions.pop(to_remove)
-            if state.selected_region_idx == to_remove:
-                state.selected_region_idx = None
+                if imgui.button("Click Image to Add"):
+                    state.placing_region = True
+                imgui.same_line()
+                if imgui.button("Add at Center"):
+                    ny_c, nx_c = img.shape
+                    c_sky = pixel_to_sky(img, nx_c * 0.5, ny_c * 0.5)
+                    if c_sky is not None:
+                        state.add_manual_region_at(c_sky[0], c_sky[1])
+        else:
+            if state.placing_region:
+                imgui.text_colored(
+                    imgui.ImVec4(1.0, 0.85, 0.2, 1.0),
+                    f"Click vertices ({len(state.poly_draft_vertices)})",
+                )
+                if len(state.poly_draft_vertices) >= 3 and imgui.button("Finish Polygon"):
+                    state.finish_polygon_draft()
+                imgui.same_line()
+                if imgui.button("Cancel##poly"):
+                    state.poly_draft_vertices.clear()
+                    state.placing_region = False
+            else:
+                if imgui.button("Pick Polygon Vertices"):
+                    state.poly_draft_vertices.clear()
+                    state.placing_region = True
+
+        if state.regions:
+            imgui.separator_text("Region List")
+            list_h = min(160.0, max(52.0, len(state.regions) * 24.0))
+            if imgui.begin_child("##reg_list", imgui.ImVec2(0.0, list_h), imgui.ChildFlags_.borders):
+                to_remove: int | None = None
+                for idx, reg in enumerate(state.regions):
+                    is_sel = state.selected_region_idx == idx
+                    prefix = "" if reg.include else "[-] "
+                    if isinstance(reg, BoxRegion):
+                        desc = f"{prefix}{reg.name}  ({reg.width_arcsec:.0f}\"x{reg.height_arcsec:.0f}\")"
+                    elif isinstance(reg, EllipseRegion):
+                        desc = f"{prefix}{reg.name}  (ell {reg.semi_major_arcsec:.0f}\"x{reg.semi_minor_arcsec:.0f}\")"
+                    elif isinstance(reg, PolygonRegion):
+                        desc = f"{prefix}{reg.name}  (poly {len(reg.vertices_deg)}v)"
+                    else:
+                        desc = f"{prefix}{reg.name}  (r={reg.radius_arcsec:.0f}\")"
+                    clicked, _ = imgui.selectable(
+                        f"{desc}##sel_{idx}", is_sel, imgui.SelectableFlags_.allow_overlap
+                    )
+                    if clicked:
+                        state.selected_region_idx = None if is_sel else idx
+                    imgui.same_line()
+                    if imgui.small_button(f"X##del_{idx}"):
+                        to_remove = idx
+                if to_remove is not None:
+                    state.regions.pop(to_remove)
+                    if state.selected_region_idx == to_remove:
+                        state.selected_region_idx = None
+                    elif (
+                        state.selected_region_idx is not None
+                        and state.selected_region_idx > to_remove
+                    ):
+                        state.selected_region_idx -= 1
+            imgui.end_child()
+
+        _draw_selected_region_editor(state)
+
+    imgui.spacing()
+    imgui.separator()
+    imgui.text_disabled("Tips: Drag cyan/yellow dots to adjust strip.")
+    imgui.text_disabled("Click a region in list to edit or stretch box edge.")
 
 
 def _draw_region_overlays(state: ImageViewerState) -> None:
@@ -519,6 +738,23 @@ def _draw_region_overlays(state: ImageViewerState) -> None:
                 draw_list.add_circle_filled(c_scr, r_scr, fill, 36)
                 draw_list.add_circle(c_scr, r_scr, fg, 36, lw)
                 _draw_label(imgui.ImVec2(c_scr.x, c_scr.y - r_scr - 10.0), reg.name, fg)
+        elif isinstance(reg, EllipseRegion):
+            outline = ellipse_outline_pixels(reg, img)
+            if outline:
+                pts = [implot.plot_to_pixels(x, y) for x, y in outline]
+                draw_list.add_convex_poly_filled(pts, fill)
+                draw_list.add_polyline(pts, fg, lw, imgui.ImDrawFlags_.closed)
+                cx = sum(p.x for p in pts) / len(pts)
+                cy = min(p.y for p in pts) - 10.0
+                _draw_label(imgui.ImVec2(cx, cy), reg.name, fg)
+        elif isinstance(reg, PolygonRegion):
+            verts = polygon_pixels(reg, img)
+            if verts and len(verts) >= 3:
+                pts = [implot.plot_to_pixels(x, y) for x, y in verts]
+                draw_list.add_polyline(pts, fg, lw, imgui.ImDrawFlags_.closed)
+                cx = sum(p.x for p in pts) / len(pts)
+                cy = sum(p.y for p in pts) / len(pts)
+                _draw_label(imgui.ImVec2(cx, cy), reg.name, fg)
 
     prev_boxes = state.preview_boxes()
     prev_step = _box_screen_step(prev_boxes)
@@ -526,6 +762,20 @@ def _draw_region_overlays(state: ImageViewerState) -> None:
     for idx, box in enumerate(prev_boxes):
         show_lbl = idx == 0 or idx == len(prev_boxes) - 1 or (idx % prev_stride == 0)
         _draw_box(box, cyan_fg, cyan_fill, 1.2, draw_label=show_lbl, label_above=(idx % 2 == 0))
+
+    # Draw in-progress polygon vertices
+    if state.poly_draft_vertices and img.wcs is not None:
+        draft_pts: list[imgui.ImVec2] = []
+        for ra, dec in state.poly_draft_vertices:
+            px = sky_to_pixel(img, ra, dec)
+            if px is not None:
+                draft_pts.append(implot.plot_to_pixels(px[0], px[1]))
+        if draft_pts:
+            poly_col = imgui.get_color_u32(imgui.ImVec4(1.0, 0.85, 0.2, 0.95))
+            if len(draft_pts) >= 2:
+                draw_list.add_polyline(draft_pts, poly_col, 1.5, 0)
+            for pt in draft_pts:
+                draw_list.add_circle_filled(pt, 4.0, poly_col, 12)
 
     # Subtle axis guide line between start and end handles
     if state.preview_strip and img.wcs is not None:
@@ -574,13 +824,27 @@ def _draw_region_overlays(state: ImageViewerState) -> None:
                     )
                     state.strip_end_sky = new_end
 
-    # Single-edge height stretch handles for the currently selected BoxRegion
+    # Center drag handle + single-edge height handles for the currently selected region
     if (
         state.selected_region_idx is not None
         and 0 <= state.selected_region_idx < len(state.regions)
         and img.wcs is not None
     ):
         sel_reg = state.regions[state.selected_region_idx]
+        handle_col = imgui.ImVec4(1.00, 0.40, 0.80, 1.0)
+        if isinstance(sel_reg, (CircleRegion, BoxRegion, EllipseRegion)):
+            c_px = sky_to_pixel(img, sel_reg.ra_deg, sel_reg.dec_deg)
+            if c_px is not None:
+                ch_c, cx_new, cy_new, _, hov_c, _ = implot.drag_point(
+                    200, c_px[0], c_px[1], handle_col, 5.5
+                )
+                if hov_c:
+                    imgui.set_tooltip(f"{sel_reg.name}: drag to move center")
+                if ch_c:
+                    new_sky = pixel_to_sky(img, cx_new, cy_new)
+                    if new_sky is not None:
+                        sel_reg.ra_deg, sel_reg.dec_deg = new_sky
+
         if isinstance(sel_reg, BoxRegion):
             corners = box_corners_pixels(sel_reg, img)
             if corners is not None:
@@ -592,7 +856,6 @@ def _draw_region_overlays(state: ImageViewerState) -> None:
                     (corners[2][0] + corners[3][0]) * 0.5,
                     (corners[2][1] + corners[3][1]) * 0.5,
                 )
-                handle_col = imgui.ImVec4(1.00, 0.40, 0.80, 1.0)
                 ch_top, tx, ty, _, hov_top, _ = implot.drag_point(
                     201, top_mid_px[0], top_mid_px[1], handle_col, 5.5
                 )
@@ -669,6 +932,13 @@ def _draw_image_canvas(state: ImageViewerState) -> None:
                     )
                 else:
                     status_text = f"x={mouse.x:.1f}, y={mouse.y:.1f}  |  val={val:.4g}"
+
+                if state.placing_region and imgui.is_mouse_clicked(0) and sky is not None:
+                    if state.add_shape_idx == 3:
+                        state.poly_draft_vertices.append(sky)
+                    else:
+                        state.add_manual_region_at(sky[0], sky[1])
+                        state.placing_region = False
 
         implot.end_plot()
     implot.pop_colormap()
