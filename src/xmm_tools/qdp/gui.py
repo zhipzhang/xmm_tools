@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import sys
 
@@ -35,6 +36,36 @@ class WindowViewState:
     log_y: bool = False
 
 
+_DEFAULT_RECENT_PATH = Path.home() / ".config" / "xmm_tools" / "recent_qdp.json"
+_MAX_RECENT_FILES = 10
+
+
+def _load_recent_files(store_path: Path = _DEFAULT_RECENT_PATH) -> list[str]:
+    """Load recent QDP file paths from disk, ignoring missing/corrupt data."""
+    try:
+        raw = json.loads(store_path.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            return [str(p) for p in raw if isinstance(p, str)][:_MAX_RECENT_FILES]
+    except OSError:
+        pass
+    except json.JSONDecodeError:
+        pass
+    return []
+
+
+def _save_recent_files(
+    recent: list[str], store_path: Path = _DEFAULT_RECENT_PATH
+) -> None:
+    """Persist recent QDP file paths to disk."""
+    try:
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store_path.write_text(
+            json.dumps(recent[:_MAX_RECENT_FILES], indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
 @dataclass
 class QDPViewerState:
     """Application state for the ImGui QDP viewer."""
@@ -46,8 +77,24 @@ class QDPViewerState:
     show_annotations: bool = True
     limit_reset_epoch: int = 0
     file_dialog: pfd.open_file | None = None
+    recent_store_path: Path = _DEFAULT_RECENT_PATH
+    recent_files: list[str] = field(default_factory=list)
     series_states: dict[int, SeriesViewState] = field(default_factory=dict)
     window_states: dict[int, WindowViewState] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.recent_files:
+            self.recent_files = _load_recent_files(self.recent_store_path)
+
+    def _record_recent(self, path: Path) -> None:
+        resolved = str(path.resolve())
+        updated = [resolved] + [p for p in self.recent_files if p != resolved]
+        self.recent_files = updated[:_MAX_RECENT_FILES]
+        _save_recent_files(self.recent_files, self.recent_store_path)
+
+    def clear_recent(self) -> None:
+        self.recent_files = []
+        _save_recent_files(self.recent_files, self.recent_store_path)
 
     def open_file(self, path: str | Path) -> None:
         """Load a QDP file and initialize per-window / per-series view state."""
@@ -60,6 +107,8 @@ class QDPViewerState:
         self.data = loaded
         self.error_message = ""
         self.path_input = str(loaded.path) if loaded.path else ""
+        if loaded.path is not None:
+            self._record_recent(loaded.path)
         self.limit_reset_epoch += 1
         self.series_states = {
             s.y_index: SeriesViewState(
@@ -115,6 +164,27 @@ def _draw_toolbar(state: QDPViewerState) -> None:
             str(Path(state.path_input).parent) if state.path_input else "",
             ["QDP Files (*.qdp *.QDP)", "*.qdp *.QDP", "All Files", "*"],
         )
+
+    imgui.same_line()
+    if imgui.button("Recent"):
+        imgui.open_popup("##recent_files_popup")
+
+    if imgui.begin_popup("##recent_files_popup"):
+        if not state.recent_files:
+            imgui.text_disabled("No recent files")
+        else:
+            for idx, recent_str in enumerate(list(state.recent_files)):
+                rp = Path(recent_str)
+                clicked, _ = imgui.menu_item(f"{rp.name}##recent_{idx}", "", False)
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip(recent_str)
+                if clicked:
+                    state.open_file(rp)
+            imgui.separator()
+            clear_clicked, _ = imgui.menu_item("Clear Recent", "", False)
+            if clear_clicked:
+                state.clear_recent()
+        imgui.end_popup()
 
     imgui.same_line()
     imgui.set_next_item_width(480.0)

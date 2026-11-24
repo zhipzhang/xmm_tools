@@ -1,6 +1,7 @@
 """Tests for XMM-Newton QDP parsing and GUI state helpers."""
 
 from pathlib import Path
+import tempfile
 import unittest
 
 from xmm_tools.qdp import load_qdp, parse_qdp_text
@@ -104,10 +105,30 @@ NO NO NO NO NO NO
         self.assertTrue(data.series[0].visible)
         self.assertFalse(data.series[1].visible)  # line off 3 / col off 3
 
-        state = QDPViewerState()
+        state = QDPViewerState(recent_store_path=Path(tempfile.mkdtemp()) / "recent.json")
         state.open_file(EXAMPLE_BKGSPEC)
         self.assertEqual(state.error_message, "")
         self.assertIsNotNone(state.data)
+
+    def test_recent_files_persistence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "recent.json"
+            q1 = Path(tmp) / "a.qdp"
+            q2 = Path(tmp) / "b.qdp"
+            q1.write_text("1 2\n", encoding="utf-8")
+            q2.write_text("3 4\n", encoding="utf-8")
+
+            s1 = QDPViewerState(recent_store_path=store)
+            s1.open_file(q1)
+            s1.open_file(q2)
+            s1.open_file(q1)  # re-opening moves q1 to front without duplicating
+            self.assertEqual(s1.recent_files, [str(q1.resolve()), str(q2.resolve())])
+
+            s2 = QDPViewerState(recent_store_path=store)
+            self.assertEqual(s2.recent_files, [str(q1.resolve()), str(q2.resolve())])
+
+            s2.clear_recent()
+            self.assertEqual(s2.recent_files, [])
 
 
 if __name__ == "__main__":
