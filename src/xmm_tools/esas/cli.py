@@ -8,6 +8,7 @@ import sys
 from xmm_tools.esas.config import ESASConfig
 from xmm_tools.esas.flare import run_flare
 from xmm_tools.esas.init import initialize_observation
+from xmm_tools.esas.source_detect import run_source_detect
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,6 +82,31 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run espfilt and FLAG filtering even if manifest exists.",
     )
+
+    p_cheese = sub.add_parser(
+        "cheese",
+        help="Run point-source detection & swiss-cheese masking from esas.toml.",
+    )
+    p_cheese.add_argument(
+        "--config",
+        default="esas.toml",
+        help="Path to esas.toml (default: ./esas.toml).",
+    )
+    p_cheese.add_argument(
+        "--docker",
+        default=None,
+        help="Optional Docker container name to run SAS commands inside.",
+    )
+    p_cheese.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate config without running SAS commands.",
+    )
+    p_cheese.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run source detection even if manifest exists.",
+    )
     return parser
 
 
@@ -116,6 +142,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Manifest:  {res.manifest_path} (flag_filtered={res.flag_filtered})")
         for key, path in res.qdp_files.items():
             print(f"  qdp[{key}]: {path}")
+        return 0
+
+    if args.subcommand == "cheese":
+        cfg = ESASConfig.from_toml(args.config)
+        res = run_source_detect(
+            cfg,
+            dry_run=args.dry_run,
+            force=args.force,
+            docker_container=args.docker,
+        )
+        print(f"Cheese dir: {res.cheese_dir}")
+        print(f"Manifest:   {res.manifest_path} (method={res.method})")
+        if res.emllist:
+            print(f"  emllist: {res.emllist.name}")
+        for key, path in res.cheese_masks.items():
+            print(f"  mask[{key}]: {path.name}")
         return 0
 
     return 1
