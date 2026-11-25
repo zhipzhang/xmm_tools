@@ -10,7 +10,7 @@ import shutil
 
 from xmm_tools.esas.config import ESASConfig
 from xmm_tools.sas.command import SASCommand
-from xmm_tools.sas.runner import SASRunner
+from xmm_tools.sas.runner import SASCommandError, SASRunner
 
 
 @dataclass
@@ -72,6 +72,135 @@ def _prefix_from_evt(evt_filename: str) -> str:
     return name
 
 
+def _discover_espfilt_prefix(
+    flare_dir: Path,
+    inst: str,
+    *,
+    pre_existing: set[str] | None = None,
+) -> str | None:
+    """Discover the real ESAS exposure prefix (e.g. ``mos1S001``) from ``*-allevc.fits``."""
+    if not flare_dir.exists():
+        return None
+
+    suffix = "-allevc.fits"
+    all_allevc = [p for p in flare_dir.glob(f"*{suffix}") if p.is_file()]
+    if not all_allevc:
+        return None
+
+    def _pick(candidates: list[Path]) -> str | None:
+        if not candidates:
+            return None
+        chosen = max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
+        return chosen.name[: -len(suffix)]
+
+    if pre_existing is not None:
+        new_inst = [
+            p for p in all_allevc if p.name not in pre_existing and p.name.startswith(inst)
+        ]
+        if new_inst:
+            return _pick(new_inst)
+        new_any = [p for p in all_allevc if p.name not in pre_existing]
+        if new_any:
+            return _pick(new_any)
+
+    inst_matches = [p for p in all_allevc if p.name.startswith(inst)]
+    return _pick(inst_matches)
+
+
+def _required_espfilt_outputs(prefix: str, *, with_oot: bool = False) -> list[str]:
+    outputs = [f"{prefix}-allevc.fits", f"{prefix}-hist.qdp", f"{prefix}-gti.fits"]
+    if with_oot:
+        outputs.append(f"{prefix}-allevcoot.fits")
+    return outputs
+
+
+def _outputs_ready(flare_dir: Path, filenames: list[str]) -> bool:
+    return all(
+        (flare_dir / name).exists() and (flare_dir / name).stat().st_size > 0
+        for name in filenames
+    )
+
+
+def _isolate_flare_intermediate(
+    flare_dir: Path,
+    pre_existing: set[str],
+    keep: set[str],
+    intermediate_dir: str = "_intermediate",
+) -> None:
+    keep_all = set(keep) | {intermediate_dir}
+    dest_dir = flare_dir / intermediate_dir
+    for entry in sorted(flare_dir.iterdir()):
+        if entry.name in pre_existing or entry.name in keep_all or entry.is_dir():
+            continue
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        target = dest_dir / entry.name
+        if target.exists():
+            target.unlink()
+        shutil.move(str(entry), str(target))
+
+
+def _run_single_espfilt(
+    runner: SASRunner,
+    *,
+    flare_dir: Path,
+    inst: str,
+    evt_name: str,
+    params: dict[str, object],
+    symlinks: dict[str, Path | str],
+    log_file: str,
+    with_oot: bool = False,
+    dry_run: bool = False,
+    force: bool = False,
+) -> str:
+    """Run ``espfilt`` for one instrument and discover its real ESAS output prefix."""
+    if not force and not dry_run:
+        existing_prefix = _discover_espfilt_prefix(flare_dir, inst)
+        if existing_prefix is not None and _outputs_ready(
+            flare_dir, _required_espfilt_outputs(existing_prefix, with_oot=with_oot)
+        ):
+            return existing_prefix
+
+    pre_existing = (
+        {p.name for p in flare_dir.iterdir()} if flare_dir.exists() else set()
+    )
+    cmd = SASCommand(
+        program="espfilt",
+        cwd=flare_dir,
+        params=params,
+        symlinks=symlinks,
+        core_outputs=[],
+        intermediate_dir=None,
+        log_file=log_file,
+    )
+    runner.run(cmd, force=force)
+
+    if dry_run:
+        return _discover_espfilt_prefix(flare_dir, inst) or _prefix_from_evt(evt_name)
+
+    prefix = _discover_espfilt_prefix(flare_dir, inst, pre_existing=pre_existing)
+    if prefix is None:
+        raise SASCommandError(
+            f"espfilt finished for {inst} but no '{inst}*-allevc.fits' output "
+            f"was found in {flare_dir}"
+        )
+
+    required = _required_espfilt_outputs(prefix, with_oot=with_oot)
+    missing_or_empty = [
+        rel
+        for rel in required
+        if not (flare_dir / rel).exists() or (flare_dir / rel).stat().st_size == 0
+    ]
+    if missing_or_empty:
+        raise SASCommandError(
+            "espfilt finished but required outputs are missing or empty: "
+            f"{', '.join(missing_or_empty)}"
+        )
+
+    keep = set(required) | set(symlinks.keys()) | {log_file}
+    _isolate_flare_intermediate(flare_dir, pre_existing, keep)
+    return prefix
+
+
 def load_flare_result(cfg: ESASConfig) -> FlareResult:
     """Load flare stage outputs from ``manifest.json`` (or scan directory)."""
     flare_dir = cfg.paths.resolve(cfg.paths.flare_dir)
@@ -85,7 +214,7 @@ def load_flare_result(cfg: ESASConfig) -> FlareResult:
     gti_files: dict[str, Path] = {}
 
     for inst, evt_name in cfg.instruments.active_mos():
-        prefix = _prefix_from_evt(evt_name)
+        prefix = _discover_espfilt_prefix(flare_dir, inst) or _prefix_from_evt(evt_name)
         allevc = flare_dir / f"{prefix}-allevc.fits"
         if allevc.exists():
             clean_events[inst] = allevc
@@ -97,7 +226,9 @@ def load_flare_result(cfg: ESASConfig) -> FlareResult:
             gti_files[inst] = gti
 
     if cfg.instruments.pn:
-        prefix = _prefix_from_evt(cfg.instruments.pn)
+        prefix = _discover_espfilt_prefix(flare_dir, "pn") or _prefix_from_evt(
+            cfg.instruments.pn
+        )
         allevc = flare_dir / f"{prefix}-allevc.fits"
         if allevc.exists():
             clean_events["pn"] = allevc
@@ -158,14 +289,11 @@ def run_flare(
 
     # 1. Run espfilt for MOS1 / MOS2
     for inst, evt_name in cfg.instruments.active_mos():
-        prefix = _prefix_from_evt(evt_name)
-        allevc_name = f"{prefix}-allevc.fits"
-        hist_name = f"{prefix}-hist.qdp"
-        gti_name = f"{prefix}-gti.fits"
-
-        cmd = SASCommand(
-            program="espfilt",
-            cwd=flare_dir,
+        prefix = _run_single_espfilt(
+            runner,
+            flare_dir=flare_dir,
+            inst=inst,
+            evt_name=evt_name,
             params={
                 "eventfile": Path(evt_name).name,
                 "elow": esp.elow,
@@ -178,11 +306,14 @@ def run_flare(
                 "keepinterfiles": esp.keepinterfiles,
             },
             symlinks={Path(evt_name).name: cfg.paths.resolve(evt_name)},
-            core_outputs=[allevc_name, hist_name, gti_name],
-            intermediate_dir="_intermediate",
             log_file=f"{inst}_espfilt.log",
+            with_oot=False,
+            dry_run=dry_run,
+            force=force,
         )
-        runner.run(cmd, force=force)
+        allevc_name = f"{prefix}-allevc.fits"
+        hist_name = f"{prefix}-hist.qdp"
+        gti_name = f"{prefix}-gti.fits"
         clean_events[inst] = flare_dir / allevc_name
         qdp_files[inst] = flare_dir / hist_name
         gti_files[inst] = flare_dir / gti_name
@@ -191,12 +322,6 @@ def run_flare(
     # 2. Run espfilt for PN (+ OOT)
     if cfg.instruments.pn:
         pn_evt = cfg.instruments.pn
-        prefix = _prefix_from_evt(pn_evt)
-        allevc_name = f"{prefix}-allevc.fits"
-        allevcoot_name = f"{prefix}-allevcoot.fits"
-        hist_name = f"{prefix}-hist.qdp"
-        gti_name = f"{prefix}-gti.fits"
-
         symlinks: dict[str, Path | str] = {
             Path(pn_evt).name: cfg.paths.resolve(pn_evt)
         }
@@ -211,30 +336,35 @@ def run_flare(
             "method": esp.method,
             "keepinterfiles": esp.keepinterfiles,
         }
-        core = [allevc_name, hist_name, gti_name]
 
+        has_oot = bool(cfg.instruments.pn_oot)
         if cfg.instruments.pn_oot:
             oot_evt = cfg.instruments.pn_oot
             symlinks[Path(oot_evt).name] = cfg.paths.resolve(oot_evt)
             pn_params["withoot"] = "Y"
             pn_params["ootfile"] = Path(oot_evt).name
-            core.append(allevcoot_name)
 
-        cmd = SASCommand(
-            program="espfilt",
-            cwd=flare_dir,
+        prefix = _run_single_espfilt(
+            runner,
+            flare_dir=flare_dir,
+            inst="pn",
+            evt_name=pn_evt,
             params=pn_params,
             symlinks=symlinks,
-            core_outputs=core,
-            intermediate_dir="_intermediate",
             log_file="pn_espfilt.log",
+            with_oot=has_oot,
+            dry_run=dry_run,
+            force=force,
         )
-        runner.run(cmd, force=force)
+        allevc_name = f"{prefix}-allevc.fits"
+        allevcoot_name = f"{prefix}-allevcoot.fits"
+        hist_name = f"{prefix}-hist.qdp"
+        gti_name = f"{prefix}-gti.fits"
         clean_events["pn"] = flare_dir / allevc_name
         qdp_files["pn"] = flare_dir / hist_name
         gti_files["pn"] = flare_dir / gti_name
         flag_targets.append(("pn", allevc_name, esp.pn_flag_expr))
-        if cfg.instruments.pn_oot:
+        if has_oot:
             clean_events["pn_oot"] = flare_dir / allevcoot_name
             flag_targets.append(("pn_oot", allevcoot_name, esp.pn_flag_expr))
 

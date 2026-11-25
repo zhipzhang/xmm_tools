@@ -49,3 +49,8 @@ htmlcov/
 
 # Sphinx build artifacts
 docs/_build/
+
+# Local helper scripts & GUI settings
+reinstall_in_docker.sh
+*.ini
+
