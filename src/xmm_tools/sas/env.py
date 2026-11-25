@@ -23,6 +23,25 @@ _SAS_ENV_KEYS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _resolve_env_path(value: object, base_dir: Path) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    if ":" in raw:
+        parts = []
+        for seg in raw.split(":"):
+            seg = seg.strip()
+            if not seg:
+                continue
+            p = Path(seg).expanduser()
+            parts.append(str(p) if p.is_absolute() else str((base_dir / p).resolve()))
+        return ":".join(parts)
+    p = Path(raw).expanduser()
+    return str(p) if p.is_absolute() else str((base_dir / p).resolve())
+
+
 @dataclass
 class SASEnv:
     """Container for XMM-Newton SAS environment variables."""
@@ -49,9 +68,25 @@ class SASEnv:
         )
 
     @classmethod
-    def from_toml(cls, path: str | Path) -> SASEnv:
-        """Load ``[env]`` from a TOML configuration file."""
+    def from_toml(
+        cls,
+        path: str | Path,
+        *,
+        base_dir: str | Path | None = None,
+    ) -> SASEnv:
+        """Load ``[env]`` from a TOML configuration file.
+
+        Relative path entries (such as ``sas_ccf = "ccf.cif"`` or
+        ``sas_odf = "*SUM.SAS"``) are resolved to absolute paths against
+        ``base_dir`` (or the directory containing ``path``) so SAS tasks
+        executed in stage subdirectories always locate them.
+        """
         toml_path = Path(path)
+        root = (
+            Path(base_dir).resolve()
+            if base_dir is not None
+            else toml_path.resolve().parent
+        )
         data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
         env_sec = data.get("env", {})
         if not isinstance(env_sec, dict):
@@ -64,12 +99,12 @@ class SASEnv:
                 extra[str(k)] = str(v)
 
         return cls(
-            sas_dir=env_sec.get("sas_dir"),
-            sas_ccf=env_sec.get("sas_ccf"),
-            sas_ccfpath=env_sec.get("sas_ccfpath"),
-            sas_odf=env_sec.get("sas_odf"),
-            caldb=env_sec.get("caldb"),
-            regions_path=env_sec.get("regions_path"),
+            sas_dir=_resolve_env_path(env_sec.get("sas_dir"), root),
+            sas_ccf=_resolve_env_path(env_sec.get("sas_ccf"), root),
+            sas_ccfpath=_resolve_env_path(env_sec.get("sas_ccfpath"), root),
+            sas_odf=_resolve_env_path(env_sec.get("sas_odf"), root),
+            caldb=_resolve_env_path(env_sec.get("caldb"), root),
+            regions_path=_resolve_env_path(env_sec.get("regions_path"), root),
             extra_env=extra,
         )
 

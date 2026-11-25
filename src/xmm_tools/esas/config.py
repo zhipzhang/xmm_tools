@@ -203,13 +203,14 @@ class ESASConfig:
         """Load an ``ESASConfig`` from a TOML file."""
         toml_path = Path(path)
         raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-        env = SASEnv.from_toml(toml_path)
 
         paths_sec = _table(raw, "paths")
         workdir_raw = paths_sec.get("workdir", ".")
         workdir = Path(workdir_raw)
         if not workdir.is_absolute():
             workdir = (toml_path.parent / workdir).resolve()
+
+        env = SASEnv.from_toml(toml_path, base_dir=workdir)
 
         paths = PathsConfig(
             workdir=workdir,

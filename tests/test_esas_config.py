@@ -138,7 +138,11 @@ class TestESASInit(unittest.TestCase):
 
             loaded = ESASConfig.from_toml(res.config_path)
             self.assertEqual(
-                str(loaded.env.sas_odf), "1234_0204870101_SCX00000SUM.SAS"
+                str(loaded.env.sas_ccf), str((work_dir / "ccf.cif").resolve())
+            )
+            self.assertEqual(
+                str(loaded.env.sas_odf),
+                str((work_dir / "1234_0204870101_SCX00000SUM.SAS").resolve()),
             )
             self.assertEqual(loaded.instruments.mos1, "mos1_evt.fits")
 

@@ -41,6 +41,30 @@ CUSTOM_FLAG = "1"
             self.assertIn("export SAS_CCF=", exports)
             self.assertIn("export CUSTOM_FLAG=1", exports)
 
+    def test_from_toml_resolves_relative_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "ccf.cif").write_text("ccf", encoding="utf-8")
+            (root / "SUM.SAS").write_text("odf", encoding="utf-8")
+            cfg = root / "esas.toml"
+            cfg.write_text(
+                """\
+[env]
+sas_ccf = "ccf.cif"
+sas_ccfpath = "/ccf/valid"
+sas_odf = "SUM.SAS"
+regions_path = ""
+""",
+                encoding="utf-8",
+            )
+
+            env = SASEnv.from_toml(cfg)
+            self.assertEqual(env.sas_ccf, str((root / "ccf.cif").resolve()))
+            self.assertEqual(env.sas_odf, str((root / "SUM.SAS").resolve()))
+            self.assertEqual(env.sas_ccfpath, "/ccf/valid")
+            self.assertEqual(env.regions_path, "")
+            env.validate(check_paths=True)
+
     def test_validate_missing_raises(self):
         env = SASEnv()
         with self.assertRaises(ValueError):
