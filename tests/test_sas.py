@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 
-from xmm_tools.sas import SASCommand, SASCommandError, SASEnv, SASRunner
+from xmm_tools.exec import SASCommand, SASCommandError, SASEnv, SASRunner
 
 
 class TestSASEnv(unittest.TestCase):

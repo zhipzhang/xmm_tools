@@ -1,4 +1,4 @@
-"""Quick-look QPB-subtracted flux imaging via ``evqpb``, ``eimageget``, ``eimagecombine``."""
+"""SAS QPB-subtracted flux imaging via ``evqpb``, ``eimageget``, ``eimagecombine``."""
 
 from __future__ import annotations
 
@@ -13,10 +13,18 @@ from typing import Any
 from astropy.io import fits
 import numpy as np
 
-from xmm_tools.esas.config import BandSpec, ESASConfig
 from xmm_tools.esas.flare import FlareResult, load_flare_result
-from xmm_tools.sas.command import SASCommand
-from xmm_tools.sas.runner import SASCommandError, SASRunner
+from xmm_tools.exec.command import SASCommand
+from xmm_tools.exec.runner import SASCommandError, SASRunner
+from xmm_tools.pipeline.config import AnaConfig, BandSpec
+from xmm_tools.pipeline.stage import (
+    StageManifest,
+    all_nonempty,
+    read_log_tail,
+    read_manifest_json,
+    relativize_manifest_paths,
+    resolve_manifest_paths,
+)
 
 _INST_PRODUCT_TOKENS: dict[str, str] = {
     "mos1": "M1",
@@ -26,10 +34,10 @@ _INST_PRODUCT_TOKENS: dict[str, str] = {
 
 
 @dataclass
-class QuickImageResult:
-    """Core artifacts produced by ``run_quick_image``."""
+class QPBImageResult(StageManifest):
+    """Core artifacts produced by ``run_qpb_image``."""
 
-    quick_image_dir: Path
+    qpb_image_dir: Path
     manifest_path: Path
     qpb_files: dict[str, Path] = field(default_factory=dict)
     band_flux_images: dict[str, Path] = field(default_factory=dict)
@@ -37,38 +45,26 @@ class QuickImageResult:
 
     def to_manifest_dict(self) -> dict[str, object]:
         return {
-            "stage": "quick_image",
+            "stage": "qpb_image",
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "qpb_files": {
-                k: str(p.relative_to(self.quick_image_dir))
-                if p.is_relative_to(self.quick_image_dir)
+                k: str(p.relative_to(self.qpb_image_dir))
+                if p.is_relative_to(self.qpb_image_dir)
                 else str(p)
                 for k, p in self.qpb_files.items()
             },
-            "band_flux_images": {
-                k: p.name for k, p in self.band_flux_images.items()
-            },
+            "band_flux_images": relativize_manifest_paths(self.band_flux_images),
         }
 
-    def save_manifest(self) -> Path:
-        self.quick_image_dir.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(
-            json.dumps(self.to_manifest_dict(), indent=2) + "\n",
-            encoding="utf-8",
-        )
-        return self.manifest_path
-
     @classmethod
-    def from_manifest(cls, manifest_path: Path) -> QuickImageResult:
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    def from_manifest(cls, manifest_path: Path) -> QPBImageResult:
+        raw = read_manifest_json(manifest_path)
         qdir = manifest_path.parent
-        qpb = {k: qdir / v for k, v in raw.get("qpb_files", {}).items()}
-        flux = {k: qdir / v for k, v in raw.get("band_flux_images", {}).items()}
         return cls(
-            quick_image_dir=qdir,
+            qpb_image_dir=qdir,
             manifest_path=manifest_path,
-            qpb_files=qpb,
-            band_flux_images=flux,
+            qpb_files=resolve_manifest_paths(qdir, raw, "qpb_files"),
+            band_flux_images=resolve_manifest_paths(qdir, raw, "band_flux_images"),
         )
 
 
@@ -83,16 +79,15 @@ def resolve_subbands(band: BandSpec, default_edges: list[int]) -> list[tuple[int
 
 
 def _resolve_attfile(
-    cfg: ESASConfig,
+    cfg: AnaConfig,
     work_dir: Path,
     runner: SASRunner,
     *,
-    dry_run: bool,
     force: bool,
 ) -> Path:
     """Locate an existing attitude FITS file or generate one via ``atthkgen``."""
-    if cfg.quick_image.attfile:
-        return cfg.paths.resolve(cfg.quick_image.attfile)
+    if cfg.qpb_image.attfile:
+        return cfg.paths.resolve(cfg.qpb_image.attfile)
 
     cheese_dir = cfg.paths.resolve(cfg.paths.cheese_dir)
     candidates = [
@@ -118,14 +113,9 @@ def _resolve_attfile(
 
 
 def _resolve_raw_events(
-    cfg: ESASConfig, *, dry_run: bool
+    cfg: AnaConfig, *, dry_run: bool
 ) -> tuple[dict[str, Path], Path | None]:
-    """Resolve raw (un-flag-filtered) event lists from ``[instruments]``.
-
-    ``eimageget`` scales FWC/QPB background using unexposed detector corners,
-    so it must receive raw ``emchain``/``epchain`` event lists rather than
-    FLAG-filtered ``*-allevc.fits`` files.
-    """
+    """Resolve raw (un-flag-filtered) event lists from ``[instruments]``."""
     raw_events: dict[str, Path] = {}
     for inst, evt_name in (
         ("mos1", cfg.instruments.mos1),
@@ -157,16 +147,16 @@ def _resolve_raw_events(
 
 
 def _resolve_gti_files(
-    cfg: ESASConfig,
+    cfg: AnaConfig,
     active_insts: list[str],
     flare_res: FlareResult,
     *,
     dry_run: bool,
 ) -> dict[str, Path]:
-    """Resolve required GTI files from ``[quick_image.gti_files]`` or ``flare``."""
+    """Resolve required GTI files from ``[sas.qpb_image.gti_files]`` or ``flare``."""
     gti_files: dict[str, Path] = {}
     for inst in active_insts:
-        override = cfg.quick_image.gti_files.get(inst)
+        override = cfg.qpb_image.gti_files.get(inst)
         if override:
             gti_path = cfg.paths.resolve(override)
         else:
@@ -174,8 +164,8 @@ def _resolve_gti_files(
             if flare_gti is None:
                 raise FileNotFoundError(
                     f"Missing GTI file for {inst!r}: configure "
-                    f"[quick_image.gti_files].{inst} in esas.toml or run "
-                    "'xmm-esas flare' first."
+                    f"[sas.qpb_image.gti_files].{inst} in ana.toml or run "
+                    "'xmm-ana flare' first."
                 )
             gti_path = flare_gti
 
@@ -270,7 +260,7 @@ def _merge_subband_sub_exp_images(
             total[valid] += counts[valid] / exp[valid]
 
     assert total is not None and header is not None
-    header["BUNIT"] = ("counts/s", "Exposure-corrected background-subtracted rate")
+    header["BUNIT"] = ("counts/s", "Exposure-corrected QPB-subtracted rate")
     header.add_history(
         "Computed sum_i(sub_i / exp_i) from eimagecombine outputs: "
         + ", ".join(sub_p.name for sub_p, _ in subband_pairs)
@@ -281,35 +271,25 @@ def _merge_subband_sub_exp_images(
     return out_path
 
 
-def _read_log_tail(log_path: Path, limit: int = 1500) -> str:
-    if not log_path.exists():
-        return ""
-    return log_path.read_text(encoding="utf-8", errors="replace")[-limit:]
-
-
-def _all_nonempty(paths: dict[str, Path]) -> bool:
-    return bool(paths) and all(
-        p.exists() and p.stat().st_size > 0 for p in paths.values()
-    )
-
-
-def run_quick_image(
-    cfg: ESASConfig,
+def run_qpb_image(
+    cfg: AnaConfig,
     *,
     flare: FlareResult | None = None,
     dry_run: bool = False,
     force: bool = False,
     docker_container: str | None = None,
-) -> QuickImageResult:
+) -> QPBImageResult:
     """Generate QPB-subtracted, exposure-corrected flux images via ``evqpb`` + ``eimageget`` + ``eimagecombine``."""
-    qi = cfg.quick_image
+    qi = cfg.qpb_image
     qdir = cfg.paths.resolve(qi.dir)
     work_dir = qdir / "_work"
     manifest_path = qdir / "manifest.json"
 
     if not force and manifest_path.exists():
-        existing = QuickImageResult.from_manifest(manifest_path)
-        if _all_nonempty(existing.band_flux_images):
+        existing = QPBImageResult.from_manifest(manifest_path)
+        if all(b in existing.band_flux_images for b in qi.bands) and all_nonempty(
+            existing.band_flux_images
+        ):
             return existing
 
     raw_events, pn_oot_path = _resolve_raw_events(cfg, dry_run=dry_run)
@@ -324,7 +304,7 @@ def run_quick_image(
         docker_container=docker_container,
     )
 
-    attfile = _resolve_attfile(cfg, work_dir, runner, dry_run=dry_run, force=force)
+    attfile = _resolve_attfile(cfg, work_dir, runner, force=force)
 
     # 1. Generate QPB/FWC event lists once per active instrument from raw events
     qpb_files: dict[str, Path] = {}
@@ -409,7 +389,7 @@ def run_quick_image(
                     band_dir, inst, pre_existing=pre_existing
                 )
                 if not produced:
-                    tail = _read_log_tail(band_dir / log_name)
+                    tail = read_log_tail(band_dir / log_name)
                     raise SASCommandError(
                         f"eimageget finished for {inst} ({band_name}) but no "
                         f"'*_ima_*.fits' outputs were found in {band_dir}.\n"
@@ -456,7 +436,7 @@ def run_quick_image(
         if not dry_run:
             pairs, mask_path = _discover_combined_subband_pairs(band_dir, out_prefix)
             if not pairs:
-                tail = _read_log_tail(band_dir / combine_log)
+                tail = read_log_tail(band_dir / combine_log)
                 raise SASCommandError(
                     f"eimagecombine finished for {band_name} but no "
                     f"'{out_prefix}ima_<i>_sub.fits' + 'exp.fits' pairs were "
@@ -466,8 +446,8 @@ def run_quick_image(
 
         band_flux_images[band_name] = flux_path
 
-    result = QuickImageResult(
-        quick_image_dir=qdir,
+    result = QPBImageResult(
+        qpb_image_dir=qdir,
         manifest_path=manifest_path,
         qpb_files=qpb_files,
         band_flux_images=band_flux_images,

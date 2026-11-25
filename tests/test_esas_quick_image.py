@@ -9,15 +9,10 @@ from unittest.mock import patch
 from astropy.io import fits
 import numpy as np
 
-from xmm_tools.esas import (
-    BandSpec,
-    ESASConfig,
-    FlareResult,
-    render_template_toml,
-    resolve_subbands,
-    run_quick_image,
-)
-from xmm_tools.sas.runner import RunResult
+from xmm_tools.esas import FlareResult
+from xmm_tools.exec.runner import RunResult
+from xmm_tools.pipeline import AnaConfig, BandSpec, render_template_toml
+from xmm_tools.sas import resolve_subbands, run_qpb_image
 
 
 class TestESASQuickImage(unittest.TestCase):
@@ -25,7 +20,7 @@ class TestESASQuickImage(unittest.TestCase):
         for name in ("mos1_evt.fits", "mos2_evt.fits", "pn_evt.fits", "pn_oot_evt.fits"):
             (root / name).write_text("raw_evt", encoding="utf-8")
 
-    def _write_flare_with_gti(self, cfg: ESASConfig) -> FlareResult:
+    def _write_flare_with_gti(self, cfg: AnaConfig) -> FlareResult:
         flare_dir = cfg.paths.resolve(cfg.paths.flare_dir)
         flare_dir.mkdir(parents=True, exist_ok=True)
         clean_events = {}
@@ -62,13 +57,13 @@ class TestESASQuickImage(unittest.TestCase):
             [(500, 1000), (1000, 2000), (2000, 4500), (4500, 7000)],
         )
 
-    def test_run_quick_image_uses_raw_events_and_gti_and_merges_subbands(self):
+    def test_run_qpb_image_uses_raw_events_and_gti_and_merges_subbands(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_raw_events(root)
             toml_path = root / "esas.toml"
             toml_path.write_text(render_template_toml(workdir="."), encoding="utf-8")
-            cfg = ESASConfig.from_toml(toml_path)
+            cfg = AnaConfig.from_toml(toml_path)
             flare = self._write_flare_with_gti(cfg)
 
             calls: list[tuple[str, dict, Path]] = []
@@ -113,8 +108,8 @@ class TestESASQuickImage(unittest.TestCase):
                         (cmd.cwd_path / out).write_text("fits", encoding="utf-8")
                 return RunResult(command=cmd, status="completed", returncode=0)
 
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
-                res = run_quick_image(cfg, flare=flare)
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                res = run_qpb_image(cfg, flare=flare)
 
             progs = [p for p, _, _ in calls]
             # 1 atthkgen + 3 evqpb + 2 bands * 3 eimageget + 2 eimagecombine
@@ -149,32 +144,32 @@ class TestESASQuickImage(unittest.TestCase):
                 self.assertEqual(hdul[0].header.get("BUNIT"), "counts/s")
 
             manifest = json.loads(res.manifest_path.read_text(encoding="utf-8"))
-            self.assertEqual(manifest["stage"], "quick_image")
+            self.assertEqual(manifest["stage"], "qpb_image")
             self.assertEqual(manifest["band_flux_images"]["soft"], "soft_500_2000_flux.fits")
 
             # Re-running without force skips via manifest.json
             calls.clear()
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
-                run_quick_image(cfg, flare=flare)
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                run_qpb_image(cfg, flare=flare)
             self.assertEqual(calls, [])
 
             # Re-running with force=True cleans stale files in band_dir first
-            stale_file = res.quick_image_dir / "_work" / "soft" / "stale_old_bin_ima_0.fits"
+            stale_file = res.qpb_image_dir / "_work" / "soft" / "stale_old_bin_ima_0.fits"
             stale_file.write_text("stale", encoding="utf-8")
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
-                run_quick_image(cfg, flare=flare, force=True)
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                run_qpb_image(cfg, flare=flare, force=True)
             self.assertFalse(stale_file.exists())
 
-    def test_run_quick_image_raises_when_gti_missing(self):
+    def test_run_qpb_image_raises_when_gti_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_raw_events(root)
             toml_path = root / "esas.toml"
             toml_path.write_text(render_template_toml(workdir="."), encoding="utf-8")
-            cfg = ESASConfig.from_toml(toml_path)
+            cfg = AnaConfig.from_toml(toml_path)
 
             with self.assertRaises(FileNotFoundError):
-                run_quick_image(cfg)
+                run_qpb_image(cfg)
 
     def test_quick_image_gti_override_in_toml(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,14 +182,14 @@ class TestESASQuickImage(unittest.TestCase):
 
             toml_text = (
                 render_template_toml(workdir=".")
-                + '\n[quick_image.gti_files]\n'
+                + '\n[sas.qpb_image.gti_files]\n'
                 + 'mos1 = "custom_gti/mos1.gti"\n'
                 + 'mos2 = "custom_gti/mos2.gti"\n'
                 + 'pn = "custom_gti/pn.gti"\n'
             )
             toml_path = root / "esas.toml"
             toml_path.write_text(toml_text, encoding="utf-8")
-            cfg = ESASConfig.from_toml(toml_path)
+            cfg = AnaConfig.from_toml(toml_path)
 
             seen_gtis: list[str] = []
 
@@ -217,8 +212,8 @@ class TestESASQuickImage(unittest.TestCase):
                         (cmd.cwd_path / out).write_text("fits", encoding="utf-8")
                 return RunResult(command=cmd, status="completed", returncode=0)
 
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
-                res = run_quick_image(cfg)
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                res = run_qpb_image(cfg)
 
             self.assertEqual(seen_gtis[:3], ["mos1.gti", "mos2.gti", "pn.gti"])
             self.assertTrue(res.band_flux_images["soft"].exists())

@@ -1,43 +1,41 @@
-"""Tests for ``xmm_tools.esas.pipeline`` and ``xmm-esas run`` CLI."""
+"""Tests for ``xmm_tools.pipeline.engine`` and ``xmm-ana run`` CLI."""
 
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from xmm_tools.esas import (
+from xmm_tools.esas import CheeseResult, FlareResult, SpectrumResult
+from xmm_tools.pipeline import (
     PIPELINE_STAGES,
     render_template_toml,
     resolve_stages,
     run_pipeline,
 )
-from xmm_tools.esas.cli import main as cli_main
-from xmm_tools.esas.flare import FlareResult
-from xmm_tools.esas.quick_image import QuickImageResult
-from xmm_tools.esas.source_detect import SourceMaskResult
-from xmm_tools.esas.spectrum import SpectrumResult
+from xmm_tools.pipeline.cli import main as cli_main
+from xmm_tools.sas import QPBImageResult
 
 
 class TestResolveStages(unittest.TestCase):
     def test_defaults(self):
         self.assertEqual(resolve_stages(), list(PIPELINE_STAGES))
         self.assertEqual(
-            PIPELINE_STAGES, ("flare", "cheese", "quick-image", "spectrum")
+            PIPELINE_STAGES, ("flare", "cheese", "qpb-image", "spectrum")
         )
 
     def test_explicit_stages_sorted_canonically_with_aliases(self):
         self.assertEqual(
-            resolve_stages(stages=["spectrum,espfilt", "source_detect"]),
-            ["flare", "cheese", "spectrum"],
+            resolve_stages(stages=["spectrum,espfilt", "qpb_image"]),
+            ["flare", "qpb-image", "spectrum"],
         )
 
     def test_from_to_and_skip(self):
         self.assertEqual(
             resolve_stages(from_stage="cheese", to_stage="spectrum"),
-            ["cheese", "quick-image", "spectrum"],
+            ["cheese", "qpb-image", "spectrum"],
         )
         self.assertEqual(
-            resolve_stages(skip=["quick-image"]),
+            resolve_stages(skip=["qpb-image"]),
             ["flare", "cheese", "spectrum"],
         )
 
@@ -56,11 +54,11 @@ class TestResolveStages(unittest.TestCase):
 
 class TestRunPipeline(unittest.TestCase):
     def _write_config(self, root: Path, *, with_regions: bool = False) -> Path:
-        toml_path = root / "esas.toml"
+        toml_path = root / "ana.toml"
         text = render_template_toml(workdir=".")
         if with_regions:
             text += (
-                '\n[[spectrum.regions]]\n'
+                '\n[[esas.spectrum.regions]]\n'
                 'name = "bg"\n'
                 'file = "regions/bg.reg"\n'
                 'mode = "single"\n'
@@ -84,28 +82,28 @@ class TestRunPipeline(unittest.TestCase):
 
             def fake_cheese(cfg, **kw):
                 order.append("cheese")
-                return SourceMaskResult(
+                return CheeseResult(
                     cheese_dir=root / "cheese",
                     manifest_path=root / "cheese" / "manifest.json",
                     method="cheese",
                 )
 
             def fake_qi(cfg, **kw):
-                order.append("quick-image")
-                return QuickImageResult(
-                    quick_image_dir=root / "quick_image",
-                    manifest_path=root / "quick_image" / "manifest.json",
+                order.append("qpb-image")
+                return QPBImageResult(
+                    qpb_image_dir=root / "qpb_image",
+                    manifest_path=root / "qpb_image" / "manifest.json",
                 )
 
             with (
-                patch("xmm_tools.esas.pipeline.run_flare", side_effect=fake_flare),
-                patch("xmm_tools.esas.pipeline.run_source_detect", side_effect=fake_cheese),
-                patch("xmm_tools.esas.pipeline.run_quick_image", side_effect=fake_qi),
+                patch("xmm_tools.pipeline.engine.run_flare", side_effect=fake_flare),
+                patch("xmm_tools.pipeline.engine.run_cheese", side_effect=fake_cheese),
+                patch("xmm_tools.pipeline.engine.run_qpb_image", side_effect=fake_qi),
             ):
                 res = run_pipeline(cfg_path)
 
-            self.assertEqual(order, ["flare", "cheese", "quick-image"])
-            self.assertEqual(res.stages_run, ["flare", "cheese", "quick-image"])
+            self.assertEqual(order, ["flare", "cheese", "qpb-image"])
+            self.assertEqual(res.stages_run, ["flare", "cheese", "qpb-image"])
             self.assertIn("spectrum", res.stages_skipped)
 
     def test_explicit_spectrum_without_regions_raises(self):
@@ -131,17 +129,17 @@ class TestRunPipeline(unittest.TestCase):
 
             def fake_cheese(cfg, **kw):
                 order.append("cheese")
-                return SourceMaskResult(
+                return CheeseResult(
                     cheese_dir=root / "cheese",
                     manifest_path=root / "cheese" / "manifest.json",
                     method="cheese",
                 )
 
             def fake_qi(cfg, **kw):
-                order.append("quick-image")
-                return QuickImageResult(
-                    quick_image_dir=root / "quick_image",
-                    manifest_path=root / "quick_image" / "manifest.json",
+                order.append("qpb-image")
+                return QPBImageResult(
+                    qpb_image_dir=root / "qpb_image",
+                    manifest_path=root / "qpb_image" / "manifest.json",
                 )
 
             def fake_spec(cfg, **kw):
@@ -152,15 +150,15 @@ class TestRunPipeline(unittest.TestCase):
                 )
 
             with (
-                patch("xmm_tools.esas.pipeline.run_flare", side_effect=fake_flare),
-                patch("xmm_tools.esas.pipeline.run_source_detect", side_effect=fake_cheese),
-                patch("xmm_tools.esas.pipeline.run_quick_image", side_effect=fake_qi),
-                patch("xmm_tools.esas.pipeline.run_spectrum", side_effect=fake_spec),
+                patch("xmm_tools.pipeline.engine.run_flare", side_effect=fake_flare),
+                patch("xmm_tools.pipeline.engine.run_cheese", side_effect=fake_cheese),
+                patch("xmm_tools.pipeline.engine.run_qpb_image", side_effect=fake_qi),
+                patch("xmm_tools.pipeline.engine.run_spectrum", side_effect=fake_spec),
             ):
                 rc = cli_main(["run", "--config", str(cfg_path), "--dry-run"])
                 self.assertEqual(rc, 0)
                 self.assertEqual(
-                    order, ["flare", "cheese", "quick-image", "spectrum"]
+                    order, ["flare", "cheese", "qpb-image", "spectrum"]
                 )
 
                 order.clear()

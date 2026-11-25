@@ -9,15 +9,13 @@ from astropy.io import fits
 import numpy as np
 
 from xmm_tools.esas import (
-    ESASConfig,
+    CheeseResult,
     FlareResult,
-    SourceMaskResult,
-    SpectrumRegionSpec,
     load_spectrum_result,
-    render_template_toml,
     run_spectrum,
 )
-from xmm_tools.sas.runner import RunResult
+from xmm_tools.exec.runner import RunResult
+from xmm_tools.pipeline import AnaConfig, SpectrumRegionSpec, render_template_toml
 
 
 def _make_dummy_sky_fits(path: Path) -> None:
@@ -49,7 +47,7 @@ def _touch(path: Path, content: str = "data") -> Path:
 
 
 class TestESASSpectrum(unittest.TestCase):
-    def _setup_workspace(self, root: Path) -> tuple[ESASConfig, FlareResult, SourceMaskResult]:
+    def _setup_workspace(self, root: Path) -> tuple[AnaConfig, FlareResult, CheeseResult]:
         toml_path = root / "esas.toml"
         toml_path.write_text(
             render_template_toml(
@@ -60,7 +58,7 @@ class TestESASSpectrum(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        cfg = ESASConfig.from_toml(toml_path)
+        cfg = AnaConfig.from_toml(toml_path)
         cfg.spectrum.elow = 500
         cfg.spectrum.ehigh = 2000
 
@@ -93,7 +91,7 @@ class TestESASSpectrum(unittest.TestCase):
             "mos2": _touch(cdir / "mos2S002-bkgregtsky.fits"),
             "pn": _touch(cdir / "pnS003-bkgregtsky.fits"),
         }
-        mask_res = SourceMaskResult(
+        mask_res = CheeseResult(
             cheese_dir=cdir,
             manifest_path=cdir / "manifest.json",
             method="cheese",
@@ -191,7 +189,7 @@ class TestESASSpectrum(unittest.TestCase):
 
             calls: list[tuple[str, Path, dict]] = []
             with patch(
-                "xmm_tools.sas.runner.SASRunner.run",
+                "xmm_tools.exec.runner.SASRunner.run",
                 new=self._fake_runner_factory(calls, zero_pn_for={"e2"}),
             ):
                 res = run_spectrum(cfg, flare=flare, mask_res=mask_res)
@@ -211,7 +209,7 @@ class TestESASSpectrum(unittest.TestCase):
             self.assertIn("||", bkg_expr)
             self.assertTrue(bkg_expr.startswith("&&("))
 
-            # Verify maskdet / masksky from SourceMaskResult.region_det / region_sky were passed
+            # Verify maskdet / masksky from CheeseResult.region_det / region_sky were passed
             mos_calls = [p for prog, _, p in calls if prog == "mosspectra"]
             pn_calls = [p for prog, _, p in calls if prog == "pnspectra"]
             self.assertTrue(mos_calls and all("maskdet" in p and "masksky" in p for p in mos_calls))
@@ -242,7 +240,7 @@ class TestESASSpectrum(unittest.TestCase):
             ]
             calls1: list[tuple[str, Path, dict]] = []
             with patch(
-                "xmm_tools.sas.runner.SASRunner.run",
+                "xmm_tools.exec.runner.SASRunner.run",
                 new=self._fake_runner_factory(calls1),
             ):
                 res1 = run_spectrum(cfg, flare=flare, mask_res=mask_res)
@@ -255,7 +253,7 @@ class TestESASSpectrum(unittest.TestCase):
             ]
             calls2: list[tuple[str, Path, dict]] = []
             with patch(
-                "xmm_tools.sas.runner.SASRunner.run",
+                "xmm_tools.exec.runner.SASRunner.run",
                 new=self._fake_runner_factory(calls2),
             ):
                 res2 = run_spectrum(cfg, flare=flare, mask_res=mask_res)
@@ -270,7 +268,7 @@ class TestESASSpectrum(unittest.TestCase):
             ]
             calls3: list[tuple[str, Path, dict]] = []
             with patch(
-                "xmm_tools.sas.runner.SASRunner.run",
+                "xmm_tools.exec.runner.SASRunner.run",
                 new=self._fake_runner_factory(calls3),
             ):
                 res3 = run_spectrum(cfg, flare=flare, mask_res=mask_res)

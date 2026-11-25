@@ -31,11 +31,12 @@ from astropy.io import fits
 from astropy.wcs import WCS
 import numpy as np
 
-from xmm_tools.esas.config import ESASConfig, SpectrumConfig, SpectrumRegionSpec
+from xmm_tools.esas.cheese import CheeseResult, load_cheese_result
 from xmm_tools.esas.flare import FlareResult, load_flare_result
-from xmm_tools.esas.source_detect import SourceMaskResult, load_source_mask_result
-from xmm_tools.sas.command import SASCommand
-from xmm_tools.sas.runner import SASRunner
+from xmm_tools.exec.command import SASCommand
+from xmm_tools.exec.runner import SASRunner
+from xmm_tools.pipeline.config import AnaConfig, SpectrumConfig, SpectrumRegionSpec
+from xmm_tools.pipeline.stage import StageManifest, read_manifest_json
 
 DET_SCALE = 20.0
 _NUMBER_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?"
@@ -188,7 +189,7 @@ class RegionSpectrumResult:
 
 
 @dataclass
-class SpectrumResult:
+class SpectrumResult(StageManifest):
     """Root manifest contract for ``spectrum/manifest.json``."""
 
     spectrum_dir: Path
@@ -205,17 +206,9 @@ class SpectrumResult:
             },
         }
 
-    def save_manifest(self) -> Path:
-        self.spectrum_dir.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(
-            json.dumps(self.to_manifest_dict(), indent=2) + "\n",
-            encoding="utf-8",
-        )
-        return self.manifest_path
-
     @classmethod
     def from_manifest(cls, manifest_path: Path) -> SpectrumResult:
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw = read_manifest_json(manifest_path)
         sdir = manifest_path.parent
         regions = {
             key: RegionSpectrumResult.from_manifest_dict(key, rdata, sdir)
@@ -224,13 +217,13 @@ class SpectrumResult:
         return cls(spectrum_dir=sdir, manifest_path=manifest_path, regions=regions)
 
 
-def load_spectrum_result(cfg: ESASConfig) -> SpectrumResult:
+def load_spectrum_result(cfg: AnaConfig) -> SpectrumResult:
     """Load ``spectrum`` outputs from ``spectrum/manifest.json``."""
     sdir = cfg.paths.resolve(cfg.paths.spectrum_dir)
     manifest_path = sdir / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(
-            f"Spectrum manifest not found at {manifest_path}; run 'xmm-esas spectrum' first."
+            f"Spectrum manifest not found at {manifest_path}; run 'xmm-ana spectrum' first."
         )
     return SpectrumResult.from_manifest(manifest_path)
 
@@ -296,7 +289,7 @@ def _import_regions(regions_path: Path | str | None = None) -> tuple[Any, ...]:
 
 def _expand_region_spec(
     spec: SpectrumRegionSpec,
-    cfg: ESASConfig,
+    cfg: AnaConfig,
     spectrum_dir: Path,
 ) -> list[_ExpandedRegionJob]:
     src_path = cfg.paths.resolve(spec.file)
@@ -668,7 +661,7 @@ def _run_single_region_job(
     *,
     spec_cfg: SpectrumConfig,
     clean_events: dict[str, Path],
-    mask_res: SourceMaskResult | None,
+    mask_res: CheeseResult | None,
     ref_images: dict[str, Path],
     runner: SASRunner,
     dry_run: bool,
@@ -901,12 +894,12 @@ def _run_single_region_job(
 
 
 def run_spectrum(
-    cfg: ESASConfig,
+    cfg: AnaConfig,
     *,
     regions: list[SpectrumRegionSpec] | None = None,
     only: list[str] | None = None,
     flare: FlareResult | None = None,
-    mask_res: SourceMaskResult | None = None,
+    mask_res: CheeseResult | None = None,
     dry_run: bool = False,
     force: bool = False,
     docker_container: str | None = None,
@@ -960,7 +953,7 @@ def run_spectrum(
 
     flare_res = flare if flare is not None else load_flare_result(cfg)
     if mask_res is None and spec_cfg.withsrcrem:
-        mask_res = load_source_mask_result(cfg)
+        mask_res = load_cheese_result(cfg)
 
     runner = SASRunner(
         env=cfg.env,

@@ -7,21 +7,20 @@ import unittest
 from unittest.mock import patch
 
 from xmm_tools.esas import (
-    ESASConfig,
+    CheeseResult,
     FlareResult,
-    SourceMaskResult,
-    load_source_mask_result,
-    render_template_toml,
-    run_source_detect,
+    load_cheese_result,
+    run_cheese,
 )
-from xmm_tools.sas.runner import RunResult
+from xmm_tools.exec.runner import RunResult
+from xmm_tools.pipeline import AnaConfig, render_template_toml
 
 
 class TestESASCheese(unittest.TestCase):
-    def _prepare_flare(self, root: Path) -> tuple[ESASConfig, FlareResult]:
-        toml_path = root / "esas.toml"
+    def _prepare_flare(self, root: Path) -> tuple[AnaConfig, FlareResult]:
+        toml_path = root / "ana.toml"
         toml_path.write_text(render_template_toml(workdir="."), encoding="utf-8")
-        cfg = ESASConfig.from_toml(toml_path)
+        cfg = AnaConfig.from_toml(toml_path)
         flare_dir = cfg.paths.resolve(cfg.paths.flare_dir)
         flare_dir.mkdir(parents=True)
 
@@ -49,7 +48,7 @@ class TestESASCheese(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cfg, _ = self._prepare_flare(root)
-            cfg.source_detect.extra_params = {"clobber": True}
+            cfg.cheese.extra_params = {"clobber": True}
             seen_cmds: list = []
 
             def fake_run(self, cmd, *, force=False):
@@ -59,8 +58,8 @@ class TestESASCheese(unittest.TestCase):
                     (cmd.cwd_path / out).write_text("fits_data", encoding="utf-8")
                 return RunResult(command=cmd, status="completed", returncode=0)
 
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
-                res = run_source_detect(cfg)
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                res = run_cheese(cfg)
 
             self.assertEqual(len(seen_cmds), 1)
             cmd = seen_cmds[0]
@@ -76,14 +75,14 @@ class TestESASCheese(unittest.TestCase):
 
             self.assertTrue(res.manifest_path.exists())
             manifest = json.loads(res.manifest_path.read_text(encoding="utf-8"))
-            self.assertEqual(manifest["stage"], "source_detect")
+            self.assertEqual(manifest["stage"], "cheese")
             self.assertEqual(manifest["method"], "cheese")
             self.assertEqual(manifest["emllist"], "emllist.fits")
 
             # Re-running without force skips via manifest.json
             seen_cmds.clear()
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
-                res2 = run_source_detect(cfg)
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                res2 = run_cheese(cfg)
             self.assertEqual(seen_cmds, [])
             self.assertEqual(res2.cheese_masks["mos1"].name, "mos1_evt-cheeset.fits")
 
@@ -101,12 +100,12 @@ class TestESASCheese(unittest.TestCase):
                     dry_run=False,
                     force=False,
                     docker_container=None,
-                ) -> SourceMaskResult:
+                ) -> CheeseResult:
                     cdir = cfg.paths.resolve(cfg.paths.cheese_dir)
                     cdir.mkdir(parents=True, exist_ok=True)
                     mask = cdir / "mos1_evt-cheeset.fits"
                     mask.write_text("custom_mask", encoding="utf-8")
-                    res = SourceMaskResult(
+                    res = CheeseResult(
                         cheese_dir=cdir,
                         manifest_path=cdir / "manifest.json",
                         method="custom_photutils",
@@ -115,9 +114,9 @@ class TestESASCheese(unittest.TestCase):
                     res.save_manifest()
                     return res
 
-            res = run_source_detect(cfg, flare=flare, detector=CustomDetector())
+            res = run_cheese(cfg, flare=flare, detector=CustomDetector())
             self.assertEqual(res.method, "custom_photutils")
-            loaded = load_source_mask_result(cfg)
+            loaded = load_cheese_result(cfg)
             self.assertEqual(loaded.method, "custom_photutils")
             self.assertEqual(loaded.cheese_masks["mos1"].name, "mos1_evt-cheeset.fits")
 

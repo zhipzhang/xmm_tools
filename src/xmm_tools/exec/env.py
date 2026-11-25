@@ -74,13 +74,7 @@ class SASEnv:
         *,
         base_dir: str | Path | None = None,
     ) -> SASEnv:
-        """Load ``[env]`` from a TOML configuration file.
-
-        Relative path entries (such as ``sas_ccf = "ccf.cif"`` or
-        ``sas_odf = "*SUM.SAS"``) are resolved to absolute paths against
-        ``base_dir`` (or the directory containing ``path``) so SAS tasks
-        executed in stage subdirectories always locate them.
-        """
+        """Load ``[env]`` from a TOML configuration file."""
         toml_path = Path(path)
         root = (
             Path(base_dir).resolve()

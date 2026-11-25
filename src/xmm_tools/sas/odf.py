@@ -1,4 +1,4 @@
-"""Dedicated observation initialization: cifbuild, odfingest, emchain, epchain."""
+"""SAS ODF initialization: ``cifbuild``, ``odfingest``, ``emchain``, ``epchain``."""
 
 from __future__ import annotations
 
@@ -6,11 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 import shutil
 
-from xmm_tools.esas.config import render_template_toml
-from xmm_tools.sas.command import SASCommand
-from xmm_tools.sas.env import SASEnv
-from xmm_tools.sas.runner import SASRunner
-
+from xmm_tools.exec.command import SASCommand
+from xmm_tools.exec.env import SASEnv
+from xmm_tools.exec.runner import SASRunner
+from xmm_tools.pipeline.config import render_template_toml
 
 STANDARD_EVENT_SPECS: tuple[tuple[str, str, str], ...] = (
     ("mos1", "*M1*MIEVLI*.FIT*", "mos1_evt.fits"),
@@ -21,7 +20,7 @@ STANDARD_EVENT_SPECS: tuple[tuple[str, str, str], ...] = (
 
 
 @dataclass
-class InitResult:
+class ODFInitResult:
     """Artifacts produced by ``initialize_observation``."""
 
     workdir: Path
@@ -78,13 +77,9 @@ def initialize_observation(
     force: bool = False,
     docker_container: str | None = None,
     copy_events: bool = False,
-) -> InitResult:
-    """Run ``cifbuild``, ``odfingest``, ``emchain``, ``epchain`` and write ``esas.toml``.
-
-    Intermediate chain products are isolated inside ``workdir/_chain_work`` so
-    ``workdir`` stays clean with ``ccf.cif``, ``*SUM.SAS``, ``esas.toml``, and
-    the four standardized ``*_evt.fits`` files.
-    """
+    config_filename: str = "ana.toml",
+) -> ODFInitResult:
+    """Run ``cifbuild``, ``odfingest``, ``emchain``, ``epchain`` and write ``ana.toml``."""
     odf_path = Path(odf_dir).resolve()
     work_path = Path(workdir).resolve()
     chain_dir = work_path / "_chain_work"
@@ -159,7 +154,7 @@ def initialize_observation(
             if (work_path / std_name).exists()
         }
 
-    if force or len(std_events) < len(STANDARD_EVENT_SPECS):
+    if force or not std_events:
         for prog, extra_params, log_name in (
             ("emchain", {}, "emchain.log"),
             ("epchain", {}, "epchain.log"),
@@ -180,8 +175,8 @@ def initialize_observation(
                 chain_dir, work_path, copy=copy_events
             )
 
-    config_path = work_path / "esas.toml"
-    if not dry_run:
+    config_path = work_path / config_filename
+    if not dry_run and (force or not config_path.exists()):
         work_path.mkdir(parents=True, exist_ok=True)
         odf_name = odf_sum.name if odf_sum is not None else "SUM.SAS"
         config_path.write_text(
@@ -190,11 +185,15 @@ def initialize_observation(
                 sas_ccf="ccf.cif",
                 sas_ccfpath=str(sas_ccfpath),
                 sas_odf=odf_name,
+                mos1=std_events["mos1"].name if "mos1" in std_events else "",
+                mos2=std_events["mos2"].name if "mos2" in std_events else "",
+                pn=std_events["pn"].name if "pn" in std_events else "",
+                pn_oot=std_events["pn_oot"].name if "pn_oot" in std_events else "",
             ),
             encoding="utf-8",
         )
 
-    return InitResult(
+    return ODFInitResult(
         workdir=work_path,
         config_path=config_path,
         ccf_path=ccf_path,

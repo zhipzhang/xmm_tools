@@ -6,22 +6,18 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from xmm_tools.esas import (
-    ESASConfig,
-    load_flare_result,
-    render_template_toml,
-    run_flare,
-)
-from xmm_tools.sas.runner import RunResult, SASCommandError
+from xmm_tools.esas import load_flare_result, run_flare
+from xmm_tools.exec.runner import RunResult, SASCommandError
+from xmm_tools.pipeline import AnaConfig, render_template_toml
 
 
 class TestESASFlare(unittest.TestCase):
-    def _write_workspace(self, root: Path) -> ESASConfig:
+    def _write_workspace(self, root: Path) -> AnaConfig:
         for name in ("mos1_evt.fits", "mos2_evt.fits", "pn_evt.fits", "pn_oot_evt.fits"):
             (root / name).write_text("evt", encoding="utf-8")
-        toml_path = root / "esas.toml"
+        toml_path = root / "ana.toml"
         toml_path.write_text(render_template_toml(workdir="."), encoding="utf-8")
-        return ESASConfig.from_toml(toml_path)
+        return AnaConfig.from_toml(toml_path)
 
     def test_run_flare_discovers_real_esas_prefixes_and_isolates_intermediates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -52,7 +48,7 @@ class TestESASFlare(unittest.TestCase):
                         (cmd.cwd_path / out).write_text("fits_data", encoding="utf-8")
                 return RunResult(command=cmd, status="completed", returncode=0)
 
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
                 res = run_flare(cfg)
 
             # 3 espfilt calls (mos1, mos2, pn) + 4 evselect calls (mos1, mos2, pn, pn_oot)
@@ -93,7 +89,7 @@ class TestESASFlare(unittest.TestCase):
 
             # Re-running without force should short-circuit via manifest.json
             calls.clear()
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
                 res2 = run_flare(cfg)
             self.assertEqual(calls, [])
             self.assertTrue(res2.flag_filtered)
@@ -125,7 +121,7 @@ class TestESASFlare(unittest.TestCase):
                         (cmd.cwd_path / out).write_text("ok", encoding="utf-8")
                 return RunResult(command=cmd, status="completed", returncode=0)
 
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
                 res = run_flare(cfg)
 
             self.assertEqual(esp_eventfiles, ["mos2_evt.fits", "pn_evt.fits"])
@@ -142,7 +138,7 @@ class TestESASFlare(unittest.TestCase):
                 cmd.cwd_path.mkdir(parents=True, exist_ok=True)
                 return RunResult(command=cmd, status="completed", returncode=0)
 
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
                 with self.assertRaises(SASCommandError):
                     run_flare(cfg)
 

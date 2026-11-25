@@ -5,20 +5,16 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from xmm_tools.esas import (
-    ESASConfig,
-    initialize_observation,
-    render_template_toml,
-    standardize_event_files,
-)
-from xmm_tools.sas.runner import RunResult
+from xmm_tools.exec.runner import RunResult
+from xmm_tools.pipeline import AnaConfig, render_template_toml
+from xmm_tools.sas import initialize_observation, standardize_event_files
 
 
 class TestESASConfig(unittest.TestCase):
     def test_template_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            toml_path = root / "esas.toml"
+            toml_path = root / "ana.toml"
             toml_path.write_text(
                 render_template_toml(
                     workdir=".",
@@ -29,7 +25,7 @@ class TestESASConfig(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            cfg = ESASConfig.from_toml(toml_path)
+            cfg = AnaConfig.from_toml(toml_path)
             self.assertEqual(str(cfg.env.sas_ccf), "/data/ccf.cif")
             self.assertEqual(cfg.paths.workdir, root.resolve())
             self.assertEqual(
@@ -43,19 +39,19 @@ class TestESASConfig(unittest.TestCase):
             self.assertEqual(cfg.instruments.pn, "pn_evt.fits")
             self.assertEqual(cfg.instruments.pn_oot, "pn_oot_evt.fits")
             self.assertEqual(cfg.espfilt.rangescale_pn, 15.0)
-            self.assertEqual(cfg.source_detect.elowlist, [350, 2500])
-            self.assertEqual(cfg.imaging.bands, [[400, 1250], [2000, 7000]])
+            self.assertEqual(cfg.cheese.elowlist, [350, 2500])
+            self.assertIn("soft", cfg.qpb_image.bands)
 
     def test_spectrum_regions_toml_parsing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            toml_path = root / "esas.toml"
+            toml_path = root / "ana.toml"
             toml_path.write_text(
                 render_template_toml(workdir=".")
-                + '\n[[spectrum.regions]]\nname = "east"\nfile = "east.reg"\nmode = "split"\noverwrite = true\n',
+                + '\n[[esas.spectrum.regions]]\nname = "east"\nfile = "east.reg"\nmode = "split"\noverwrite = true\n',
                 encoding="utf-8",
             )
-            cfg = ESASConfig.from_toml(toml_path)
+            cfg = AnaConfig.from_toml(toml_path)
             self.assertEqual(len(cfg.spectrum.regions), 1)
             self.assertEqual(cfg.spectrum.regions[0].name, "east")
             self.assertEqual(cfg.spectrum.regions[0].mode, "split")
@@ -95,7 +91,7 @@ class TestESASInit(unittest.TestCase):
 
             dry_res = initialize_observation(odf_dir, work_dir, dry_run=True)
             self.assertEqual(dry_res.workdir, work_dir.resolve())
-            self.assertFalse((work_dir / "esas.toml").exists())
+            self.assertFalse((work_dir / "ana.toml").exists())
 
             seen_programs: list[str] = []
 
@@ -126,7 +122,7 @@ class TestESASInit(unittest.TestCase):
                         )
                 return RunResult(command=cmd, status="completed", returncode=0)
 
-            with patch("xmm_tools.sas.runner.SASRunner.run", new=fake_run):
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
                 res = initialize_observation(odf_dir, work_dir)
 
             self.assertEqual(
@@ -136,7 +132,7 @@ class TestESASInit(unittest.TestCase):
             self.assertTrue(res.config_path.exists())
             self.assertEqual(set(res.event_files.keys()), {"mos1", "mos2", "pn", "pn_oot"})
 
-            loaded = ESASConfig.from_toml(res.config_path)
+            loaded = AnaConfig.from_toml(res.config_path)
             self.assertEqual(
                 str(loaded.env.sas_ccf), str((work_dir / "ccf.cif").resolve())
             )

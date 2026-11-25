@@ -1,4 +1,4 @@
-"""Point-source detection and swiss-cheese masking stage (pluggable ``SourceDetector``)."""
+"""ESAS ``cheese`` point-source detection and swiss-cheese masking stage."""
 
 from __future__ import annotations
 
@@ -8,64 +8,55 @@ import json
 from pathlib import Path
 from typing import Any, Protocol
 
-from xmm_tools.esas.config import ESASConfig
 from xmm_tools.esas.flare import FlareResult, load_flare_result
-from xmm_tools.sas.command import SASCommand
-from xmm_tools.sas.runner import SASRunner
+from xmm_tools.exec.command import SASCommand
+from xmm_tools.exec.runner import SASRunner
+from xmm_tools.pipeline.config import AnaConfig
+from xmm_tools.pipeline.stage import (
+    StageManifest,
+    all_nonempty,
+    read_manifest_json,
+    relativize_manifest_paths,
+    resolve_manifest_paths,
+)
 
 
 @dataclass
-class SourceMaskResult:
-    """Core artifacts produced by the ``source_detect`` (``cheese``) stage."""
+class CheeseResult(StageManifest):
+    """Core artifacts produced by the ``cheese`` stage."""
 
     cheese_dir: Path
     manifest_path: Path
-    method: str
+    method: str = "cheese"
     emllist: Path | None = None
     cheese_masks: dict[str, Path] = field(default_factory=dict)
     region_det: dict[str, Path] = field(default_factory=dict)
     region_sky: dict[str, Path] = field(default_factory=dict)
 
     def to_manifest_dict(self) -> dict[str, object]:
-        def _rel(mapping: dict[str, Path]) -> dict[str, str]:
-            return {k: p.name for k, p in mapping.items()}
-
         return {
-            "stage": "source_detect",
+            "stage": "cheese",
             "method": self.method,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "emllist": self.emllist.name if self.emllist is not None else None,
-            "cheese_masks": _rel(self.cheese_masks),
-            "region_det": _rel(self.region_det),
-            "region_sky": _rel(self.region_sky),
+            "cheese_masks": relativize_manifest_paths(self.cheese_masks),
+            "region_det": relativize_manifest_paths(self.region_det),
+            "region_sky": relativize_manifest_paths(self.region_sky),
         }
 
-    def save_manifest(self) -> Path:
-        self.cheese_dir.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(
-            json.dumps(self.to_manifest_dict(), indent=2) + "\n",
-            encoding="utf-8",
-        )
-        return self.manifest_path
-
     @classmethod
-    def from_manifest(cls, manifest_path: Path) -> SourceMaskResult:
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    def from_manifest(cls, manifest_path: Path) -> CheeseResult:
+        raw = read_manifest_json(manifest_path)
         cheese_dir = manifest_path.parent
-
-        def _abs(section: str) -> dict[str, Path]:
-            entries = raw.get(section, {})
-            return {k: cheese_dir / v for k, v in entries.items()}
-
         emllist_name = raw.get("emllist")
         return cls(
             cheese_dir=cheese_dir,
             manifest_path=manifest_path,
             method=str(raw.get("method", "cheese")),
             emllist=cheese_dir / emllist_name if emllist_name else None,
-            cheese_masks=_abs("cheese_masks"),
-            region_det=_abs("region_det"),
-            region_sky=_abs("region_sky"),
+            cheese_masks=resolve_manifest_paths(cheese_dir, raw, "cheese_masks"),
+            region_det=resolve_manifest_paths(cheese_dir, raw, "region_det"),
+            region_sky=resolve_manifest_paths(cheese_dir, raw, "region_sky"),
         )
 
 
@@ -74,13 +65,13 @@ class SourceDetector(Protocol):
 
     def detect(
         self,
-        cfg: ESASConfig,
+        cfg: AnaConfig,
         flare: FlareResult,
         *,
         dry_run: bool = False,
         force: bool = False,
         docker_container: str | None = None,
-    ) -> SourceMaskResult: ...
+    ) -> CheeseResult: ...
 
 
 def _stem_from_allevc(path: Path) -> str:
@@ -92,12 +83,6 @@ def _stem_from_allevc(path: Path) -> str:
     return path.stem
 
 
-def _all_nonempty(paths: dict[str, Path]) -> bool:
-    return bool(paths) and all(
-        p.exists() and p.stat().st_size > 0 for p in paths.values()
-    )
-
-
 class CheeseDetector:
     """Default ESAS ``cheese`` point-source detector and mask generator."""
 
@@ -105,29 +90,31 @@ class CheeseDetector:
 
     def detect(
         self,
-        cfg: ESASConfig,
+        cfg: AnaConfig,
         flare: FlareResult,
         *,
         dry_run: bool = False,
         force: bool = False,
         docker_container: str | None = None,
-    ) -> SourceMaskResult:
+    ) -> CheeseResult:
         cheese_dir = cfg.paths.resolve(cfg.paths.cheese_dir)
         manifest_path = cheese_dir / "manifest.json"
 
         if not force and manifest_path.exists():
-            existing = SourceMaskResult.from_manifest(manifest_path)
+            existing = CheeseResult.from_manifest(manifest_path)
+            active_insts = [k for k in ("mos1", "mos2", "pn") if k in flare.clean_events]
             if (
                 existing.emllist is not None
                 and existing.emllist.exists()
                 and existing.emllist.stat().st_size > 0
-                and _all_nonempty(existing.cheese_masks)
-                and _all_nonempty(existing.region_det)
-                and _all_nonempty(existing.region_sky)
+                and all(k in existing.cheese_masks for k in active_insts)
+                and all_nonempty(existing.cheese_masks)
+                and all_nonempty(existing.region_det)
+                and all_nonempty(existing.region_sky)
             ):
                 return existing
 
-        sd = cfg.source_detect
+        sd = cfg.cheese
         symlinks: dict[str, Path | str] = {}
         params: dict[str, Any] = {}
         core_outputs: list[str] = ["emllist.fits"]
@@ -156,6 +143,11 @@ class CheeseDetector:
             cheese_masks[inst_key] = cheese_dir / mask_name
             region_det[inst_key] = cheese_dir / det_name
             region_sky[inst_key] = cheese_dir / sky_name
+
+        if not cheese_masks:
+            raise ValueError(
+                "No clean event files found for cheese; run 'xmm-ana flare' first."
+            )
 
         pn_oot_path = flare.clean_events.get("pn_oot")
         if pn_oot_path is not None:
@@ -194,7 +186,7 @@ class CheeseDetector:
         )
         runner.run(cmd, force=force)
 
-        result = SourceMaskResult(
+        result = CheeseResult(
             cheese_dir=cheese_dir,
             manifest_path=manifest_path,
             method=self.name,
@@ -208,33 +200,19 @@ class CheeseDetector:
         return result
 
 
-_DETECTORS: dict[str, type[CheeseDetector]] = {
-    "cheese": CheeseDetector,
-}
-
-
-def run_source_detect(
-    cfg: ESASConfig,
+def run_cheese(
+    cfg: AnaConfig,
     *,
     flare: FlareResult | None = None,
     detector: SourceDetector | None = None,
     dry_run: bool = False,
     force: bool = False,
     docker_container: str | None = None,
-) -> SourceMaskResult:
-    """Run the configured point-source detector (default: ``CheeseDetector``)."""
+) -> CheeseResult:
+    """Run ESAS ``cheese`` point-source detection and masking."""
     flare_res = flare if flare is not None else load_flare_result(cfg)
-    if detector is None:
-        method = cfg.source_detect.method.lower()
-        cls = _DETECTORS.get(method)
-        if cls is None:
-            raise ValueError(
-                f"Unknown source_detect.method={cfg.source_detect.method!r}. "
-                f"Available: {', '.join(sorted(_DETECTORS))}"
-            )
-        detector = cls()
-
-    return detector.detect(
+    active_detector = detector if detector is not None else CheeseDetector()
+    return active_detector.detect(
         cfg,
         flare_res,
         dry_run=dry_run,
@@ -243,12 +221,12 @@ def run_source_detect(
     )
 
 
-def load_source_mask_result(cfg: ESASConfig) -> SourceMaskResult:
-    """Load ``source_detect`` outputs from ``manifest.json`` (or scan directory)."""
+def load_cheese_result(cfg: AnaConfig) -> CheeseResult:
+    """Load ``cheese`` outputs from ``manifest.json`` (or scan directory)."""
     cheese_dir = cfg.paths.resolve(cfg.paths.cheese_dir)
     manifest_path = cheese_dir / "manifest.json"
     if manifest_path.exists():
-        return SourceMaskResult.from_manifest(manifest_path)
+        return CheeseResult.from_manifest(manifest_path)
 
     emllist = cheese_dir / "emllist.fits"
     cheese_masks: dict[str, Path] = {}
@@ -271,10 +249,10 @@ def load_source_mask_result(cfg: ESASConfig) -> SourceMaskResult:
         if sky.exists():
             region_sky[inst_key] = sky
 
-    return SourceMaskResult(
+    return CheeseResult(
         cheese_dir=cheese_dir,
         manifest_path=manifest_path,
-        method=cfg.source_detect.method,
+        method="cheese",
         emllist=emllist if emllist.exists() else None,
         cheese_masks=cheese_masks,
         region_det=region_det,

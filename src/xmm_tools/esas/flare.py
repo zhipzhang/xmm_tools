@@ -8,13 +8,20 @@ import json
 from pathlib import Path
 import shutil
 
-from xmm_tools.esas.config import ESASConfig
-from xmm_tools.sas.command import SASCommand
-from xmm_tools.sas.runner import SASCommandError, SASRunner
+from xmm_tools.exec.command import SASCommand
+from xmm_tools.exec.runner import SASCommandError, SASRunner
+from xmm_tools.pipeline.config import AnaConfig
+from xmm_tools.pipeline.stage import (
+    StageManifest,
+    all_nonempty,
+    read_manifest_json,
+    relativize_manifest_paths,
+    resolve_manifest_paths,
+)
 
 
 @dataclass
-class FlareResult:
+class FlareResult(StageManifest):
     """Core artifacts produced by the ``flare`` stage."""
 
     flare_dir: Path
@@ -25,42 +32,26 @@ class FlareResult:
     gti_files: dict[str, Path] = field(default_factory=dict)
 
     def to_manifest_dict(self) -> dict[str, object]:
-        def _rel(mapping: dict[str, Path]) -> dict[str, str]:
-            return {k: p.name for k, p in mapping.items()}
-
         return {
             "stage": "flare",
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "flag_filtered": self.flag_filtered,
-            "clean_events": _rel(self.clean_events),
-            "qdp_files": _rel(self.qdp_files),
-            "gti_files": _rel(self.gti_files),
+            "clean_events": relativize_manifest_paths(self.clean_events),
+            "qdp_files": relativize_manifest_paths(self.qdp_files),
+            "gti_files": relativize_manifest_paths(self.gti_files),
         }
-
-    def save_manifest(self) -> Path:
-        self.flare_dir.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(
-            json.dumps(self.to_manifest_dict(), indent=2) + "\n",
-            encoding="utf-8",
-        )
-        return self.manifest_path
 
     @classmethod
     def from_manifest(cls, manifest_path: Path) -> FlareResult:
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw = read_manifest_json(manifest_path)
         flare_dir = manifest_path.parent
-
-        def _abs(section: str) -> dict[str, Path]:
-            entries = raw.get(section, {})
-            return {k: flare_dir / v for k, v in entries.items()}
-
         return cls(
             flare_dir=flare_dir,
             manifest_path=manifest_path,
             flag_filtered=bool(raw.get("flag_filtered", False)),
-            clean_events=_abs("clean_events"),
-            qdp_files=_abs("qdp_files"),
-            gti_files=_abs("gti_files"),
+            clean_events=resolve_manifest_paths(flare_dir, raw, "clean_events"),
+            qdp_files=resolve_manifest_paths(flare_dir, raw, "qdp_files"),
+            gti_files=resolve_manifest_paths(flare_dir, raw, "gti_files"),
         )
 
 
@@ -201,7 +192,7 @@ def _run_single_espfilt(
     return prefix
 
 
-def load_flare_result(cfg: ESASConfig) -> FlareResult:
+def load_flare_result(cfg: AnaConfig) -> FlareResult:
     """Load flare stage outputs from ``manifest.json`` (or scan directory)."""
     flare_dir = cfg.paths.resolve(cfg.paths.flare_dir)
     manifest_path = flare_dir / "manifest.json"
@@ -252,12 +243,8 @@ def load_flare_result(cfg: ESASConfig) -> FlareResult:
     )
 
 
-def _all_nonempty(paths: dict[str, Path]) -> bool:
-    return bool(paths) and all(p.exists() and p.stat().st_size > 0 for p in paths.values())
-
-
 def run_flare(
-    cfg: ESASConfig,
+    cfg: AnaConfig,
     *,
     dry_run: bool = False,
     force: bool = False,
@@ -268,11 +255,12 @@ def run_flare(
     manifest_path = flare_dir / "manifest.json"
     esp = cfg.espfilt
 
-    # Check if already completed (including FLAG requirement)
+    # Check if already completed (including FLAG requirement and active instruments)
     if not force and manifest_path.exists():
         existing = FlareResult.from_manifest(manifest_path)
         flag_ok = (not esp.apply_flag_filter) or existing.flag_filtered
-        if flag_ok and _all_nonempty(existing.clean_events):
+        insts_ok = all(k in existing.clean_events for k in cfg.instruments.active_keys())
+        if flag_ok and insts_ok and all_nonempty(existing.clean_events):
             return existing
 
     runner = SASRunner(

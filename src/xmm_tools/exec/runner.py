@@ -10,8 +10,8 @@ import tempfile
 import time
 from typing import Literal
 
-from xmm_tools.sas.command import SASCommand
-from xmm_tools.sas.env import SASEnv
+from xmm_tools.exec.command import SASCommand
+from xmm_tools.exec.env import SASEnv
 
 
 RunStatus = Literal["completed", "skipped", "dry_run"]
