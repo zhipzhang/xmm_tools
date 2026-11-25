@@ -8,6 +8,7 @@ import sys
 from xmm_tools.esas.config import ESASConfig, SpectrumRegionSpec
 from xmm_tools.esas.flare import run_flare
 from xmm_tools.esas.init import initialize_observation
+from xmm_tools.esas.pipeline import PIPELINE_STAGES, run_pipeline
 from xmm_tools.esas.quick_image import run_quick_image
 from xmm_tools.esas.source_detect import run_source_detect
 from xmm_tools.esas.spectrum import run_spectrum
@@ -186,6 +187,64 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force re-running all selected regions even if present in manifest.json.",
     )
+
+    p_run = sub.add_parser(
+        "run",
+        help="Run all or selected config-driven ESAS stages in dependency order.",
+    )
+    p_run.add_argument(
+        "--config",
+        default="esas.toml",
+        help="Path to esas.toml (default: ./esas.toml).",
+    )
+    p_run.add_argument(
+        "--stages",
+        action="append",
+        default=None,
+        help=(
+            "Comma-separated or repeatable list of stages to run "
+            f"({', '.join(PIPELINE_STAGES)}). Mutually exclusive with --from/--to."
+        ),
+    )
+    p_run.add_argument(
+        "--from",
+        dest="from_stage",
+        default=None,
+        help="First stage to run in a contiguous range.",
+    )
+    p_run.add_argument(
+        "--to",
+        dest="to_stage",
+        default=None,
+        help="Last stage (inclusive) to run in a contiguous range.",
+    )
+    p_run.add_argument(
+        "--skip",
+        action="append",
+        default=None,
+        help="Comma-separated or repeatable list of stages to skip.",
+    )
+    p_run.add_argument(
+        "--only",
+        action="append",
+        default=None,
+        help="Forward --only region filter to the 'spectrum' stage (repeatable).",
+    )
+    p_run.add_argument(
+        "--docker",
+        default=None,
+        help="Optional Docker container name to run SAS commands inside.",
+    )
+    p_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate configuration and stage plan without running SAS commands.",
+    )
+    p_run.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-running all selected stages even if manifests/outputs exist.",
+    )
     return parser
 
 
@@ -284,6 +343,24 @@ def main(argv: list[str] | None = None) -> int:
                 for inst, p in reg.instruments.items()
             )
             print(f"  {key} [{reg.mode}]: {summary}")
+        return 0
+
+    if args.subcommand == "run":
+        res = run_pipeline(
+            config_path=args.config,
+            stages=args.stages,
+            from_stage=args.from_stage,
+            to_stage=args.to_stage,
+            skip=args.skip,
+            only=args.only,
+            dry_run=args.dry_run,
+            force=args.force,
+            docker_container=args.docker,
+        )
+        print(f"Config:    {res.config_path}")
+        print(f"Stages:    {', '.join(res.stages_run) if res.stages_run else '(none)'}")
+        for stage, reason in res.stages_skipped.items():
+            print(f"  skipped[{stage}]: {reason}")
         return 0
 
     return 1

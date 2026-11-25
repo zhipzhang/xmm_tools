@@ -8,6 +8,26 @@ ESAS Configuration & Workflow
    :members:
    :undoc-members:
 
+.. automodule:: xmm_tools.esas.pipeline
+   :members:
+   :undoc-members:
+
+.. automodule:: xmm_tools.esas.init
+   :members:
+   :undoc-members:
+
+.. automodule:: xmm_tools.esas.flare
+   :members:
+   :undoc-members:
+
+.. automodule:: xmm_tools.esas.source_detect
+   :members:
+   :undoc-members:
+
+.. automodule:: xmm_tools.esas.quick_image
+   :members:
+   :undoc-members:
+
 .. automodule:: xmm_tools.esas.spectrum
    :members:
    :undoc-members:

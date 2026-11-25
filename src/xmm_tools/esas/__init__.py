@@ -15,6 +15,13 @@ from xmm_tools.esas.config import (
 )
 from xmm_tools.esas.flare import FlareResult, load_flare_result, run_flare
 from xmm_tools.esas.init import InitResult, initialize_observation, standardize_event_files
+from xmm_tools.esas.pipeline import (
+    PIPELINE_STAGES,
+    PipelineResult,
+    normalize_stage_name,
+    resolve_stages,
+    run_pipeline,
+)
 from xmm_tools.esas.quick_image import QuickImageResult, resolve_subbands, run_quick_image
 from xmm_tools.esas.source_detect import (
     CheeseDetector,
@@ -41,7 +48,9 @@ __all__ = [
     "InitResult",
     "InstrumentProducts",
     "InstrumentsConfig",
+    "PIPELINE_STAGES",
     "PathsConfig",
+    "PipelineResult",
     "QuickImageConfig",
     "QuickImageResult",
     "RegionSpectrumResult",
@@ -56,9 +65,12 @@ __all__ = [
     "load_flare_result",
     "load_source_mask_result",
     "load_spectrum_result",
+    "normalize_stage_name",
     "render_template_toml",
+    "resolve_stages",
     "resolve_subbands",
     "run_flare",
+    "run_pipeline",
     "run_quick_image",
     "run_source_detect",
     "run_spectrum",
