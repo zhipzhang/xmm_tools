@@ -230,15 +230,22 @@ section and parameter with its default value, unit, and purpose:
    # ----------------------------------------------------------------------------
    [quick_image]
    dir = "quick_image"                   # Output directory for quick-look flux images
-   bin_size = 40                         # Spatial pixel bin size (40 physical units ≈ 2 arcsec/pix)
+   bin_size = 50                         # Spatial pixel bin size (50 physical units = 2.5 arcsec/pix)
    with_vignetting = true                # Apply telescope vignetting correction in eimageget
-   use_cheese_mask = false               # Apply cheese point-source masks (requires `cheese` stage)
+   with_asmooth = false                  # Run eimagecombine asmooth (false = keep unsmoothed sub/exp maps)
    combine_instruments = true            # Merge MOS1 + MOS2 + PN via eimagecombine per target band
    attfile = ""                          # Attitude FITS file ("" = auto-locate atthk.fits or run atthkgen)
    default_subband_edges = [350, 500, 750, 1000, 1500, 2000, 3000, 4500, 7000, 10000]
    evqpb_extra_params = {}               # Extra key=value parameters passed through to `evqpb`
    eimageget_extra_params = {}           # Extra key=value parameters passed through to `eimageget`
    eimagecombine_extra_params = {}       # Extra key=value parameters passed through to `eimagecombine`
+
+   # Optional per-instrument GTI overrides (relative to workdir or absolute).
+   # When omitted, GTI files are loaded automatically from soft_proton_flare/manifest.json.
+   # [quick_image.gti_files]
+   # mos1 = "soft_proton_flare/mos1S001-gti.fits"
+   # mos2 = "soft_proton_flare/mos2S002-gti.fits"
+   # pn = "soft_proton_flare/pnS003-gti.fits"
 
    # Target energy bands for quick-look flux maps.
    # If `subbands` is omitted or empty, the band is automatically split along `default_subband_edges`.

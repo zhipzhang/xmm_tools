@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import time
 from typing import Literal
 
@@ -138,13 +139,28 @@ class SASRunner:
         proc_env = None if self.docker_container else self.env.to_env_dict()
 
         t0 = time.monotonic()
-        proc = subprocess.run(
-            exec_argv,
-            cwd=None if self.docker_container else cwd,
-            env=proc_env,
-            text=True,
-            capture_output=True,
-        )
+        if proc_env is not None and proc_env.get("PFILES"):
+            orig_pfiles = proc_env["PFILES"]
+            sys_pfiles = (
+                orig_pfiles.split(";", 1)[1] if ";" in orig_pfiles else orig_pfiles
+            )
+            with tempfile.TemporaryDirectory(prefix="xmm_pfiles_") as tmp_pfiles:
+                proc_env["PFILES"] = f"{tmp_pfiles};{sys_pfiles}"
+                proc = subprocess.run(
+                    exec_argv,
+                    cwd=cwd,
+                    env=proc_env,
+                    text=True,
+                    capture_output=True,
+                )
+        else:
+            proc = subprocess.run(
+                exec_argv,
+                cwd=None if self.docker_container else cwd,
+                env=proc_env,
+                text=True,
+                capture_output=True,
+            )
         elapsed = time.monotonic() - t0
 
         combined_output = ""

@@ -161,11 +161,12 @@ class QuickImageConfig:
     """Parameters for ``evqpb`` + ``eimageget`` + ``eimagecombine`` quick imaging."""
 
     dir: str = "quick_image"
-    bin_size: int = 40
+    bin_size: int = 50
     with_vignetting: bool = True
-    use_cheese_mask: bool = False
+    with_asmooth: bool = False
     combine_instruments: bool = True
     attfile: str = ""
+    gti_files: dict[str, str] = field(default_factory=dict)
     default_subband_edges: list[int] = field(
         default_factory=lambda: [350, 500, 750, 1000, 1500, 2000, 3000, 4500, 7000, 10000]
     )
@@ -325,13 +326,23 @@ class ESASConfig:
         else:
             qi_bands = _default_quick_bands()
 
+        qi_gti_raw = qi_sec.get("gti_files", {})
+        if not isinstance(qi_gti_raw, dict):
+            raise ValueError("Expected [quick_image.gti_files] table in TOML config")
+        qi_gti_files = {
+            str(k): str(v)
+            for k, v in qi_gti_raw.items()
+            if v is not None and str(v).strip()
+        }
+
         quick_image = QuickImageConfig(
             dir=str(qi_sec.get("dir", "quick_image")),
-            bin_size=int(qi_sec.get("bin_size", 40)),
+            bin_size=int(qi_sec.get("bin_size", 50)),
             with_vignetting=bool(qi_sec.get("with_vignetting", True)),
-            use_cheese_mask=bool(qi_sec.get("use_cheese_mask", False)),
+            with_asmooth=bool(qi_sec.get("with_asmooth", False)),
             combine_instruments=bool(qi_sec.get("combine_instruments", True)),
             attfile=str(qi_sec.get("attfile", "")),
+            gti_files=qi_gti_files,
             default_subband_edges=[
                 int(x)
                 for x in qi_sec.get(
@@ -461,15 +472,22 @@ back_extra_params = {{}}             # Extra key=value parameters for mosback/pn
 
 [quick_image]
 dir = "quick_image"                  # Output directory for quick-look QPB-subtracted flux images
-bin_size = 40                        # Spatial pixel bin size (40 physical units ≈ 2 arcsec/pix)
+bin_size = 50                        # Spatial pixel bin size (50 physical units = 2.5 arcsec/pix)
 with_vignetting = true               # Apply telescope vignetting correction in eimageget
-use_cheese_mask = false              # Apply cheese point-source masks if available
+with_asmooth = false                 # Run eimagecombine asmooth (false = keep unsmoothed sub/exp maps)
 combine_instruments = true           # Merge MOS1+MOS2+PN with eimagecombine per target band
 attfile = ""                         # Attitude FITS file (empty = reuse atthk.fits or run atthkgen)
 default_subband_edges = [350, 500, 750, 1000, 1500, 2000, 3000, 4500, 7000, 10000]
 evqpb_extra_params = {{}}              # Extra key=value parameters passed through to evqpb
 eimageget_extra_params = {{}}          # Extra key=value parameters passed through to eimageget
 eimagecombine_extra_params = {{}}      # Extra key=value parameters passed through to eimagecombine
+
+# Optional per-instrument GTI overrides (relative to workdir or absolute).
+# When omitted, GTI files are loaded automatically from soft_proton_flare/manifest.json.
+# [quick_image.gti_files]
+# mos1 = "soft_proton_flare/mos1S001-gti.fits"
+# mos2 = "soft_proton_flare/mos2S002-gti.fits"
+# pn = "soft_proton_flare/pnS003-gti.fits"
 
 [quick_image.bands.soft]
 emin = 500                           # Target soft-band lower bound (eV)

@@ -6,13 +6,23 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
+import shutil
 from typing import Any
+
+from astropy.io import fits
+import numpy as np
 
 from xmm_tools.esas.config import BandSpec, ESASConfig
 from xmm_tools.esas.flare import FlareResult, load_flare_result
-from xmm_tools.esas.source_detect import load_source_mask_result
 from xmm_tools.sas.command import SASCommand
-from xmm_tools.sas.runner import SASRunner
+from xmm_tools.sas.runner import SASCommandError, SASRunner
+
+_INST_PRODUCT_TOKENS: dict[str, str] = {
+    "mos1": "M1",
+    "mos2": "M2",
+    "pn": "PN",
+}
 
 
 @dataclass
@@ -107,6 +117,176 @@ def _resolve_attfile(
     return work_dir / "atthk.fits"
 
 
+def _resolve_raw_events(
+    cfg: ESASConfig, *, dry_run: bool
+) -> tuple[dict[str, Path], Path | None]:
+    """Resolve raw (un-flag-filtered) event lists from ``[instruments]``.
+
+    ``eimageget`` scales FWC/QPB background using unexposed detector corners,
+    so it must receive raw ``emchain``/``epchain`` event lists rather than
+    FLAG-filtered ``*-allevc.fits`` files.
+    """
+    raw_events: dict[str, Path] = {}
+    for inst, evt_name in (
+        ("mos1", cfg.instruments.mos1),
+        ("mos2", cfg.instruments.mos2),
+        ("pn", cfg.instruments.pn),
+    ):
+        if not evt_name:
+            continue
+        p = cfg.paths.resolve(evt_name)
+        if not dry_run and (not p.exists() or p.stat().st_size == 0):
+            raise FileNotFoundError(
+                f"Raw event file for {inst!r} not found or empty: {p}"
+            )
+        raw_events[inst] = p
+
+    if not raw_events:
+        raise ValueError("No active instruments configured in [instruments]")
+
+    pn_oot: Path | None = None
+    if cfg.instruments.pn and cfg.instruments.pn_oot:
+        p_oot = cfg.paths.resolve(cfg.instruments.pn_oot)
+        if not dry_run and (not p_oot.exists() or p_oot.stat().st_size == 0):
+            raise FileNotFoundError(
+                f"Raw PN OOT event file not found or empty: {p_oot}"
+            )
+        pn_oot = p_oot
+
+    return raw_events, pn_oot
+
+
+def _resolve_gti_files(
+    cfg: ESASConfig,
+    active_insts: list[str],
+    flare_res: FlareResult,
+    *,
+    dry_run: bool,
+) -> dict[str, Path]:
+    """Resolve required GTI files from ``[quick_image.gti_files]`` or ``flare``."""
+    gti_files: dict[str, Path] = {}
+    for inst in active_insts:
+        override = cfg.quick_image.gti_files.get(inst)
+        if override:
+            gti_path = cfg.paths.resolve(override)
+        else:
+            flare_gti = flare_res.gti_files.get(inst)
+            if flare_gti is None:
+                raise FileNotFoundError(
+                    f"Missing GTI file for {inst!r}: configure "
+                    f"[quick_image.gti_files].{inst} in esas.toml or run "
+                    "'xmm-esas flare' first."
+                )
+            gti_path = flare_gti
+
+        if not dry_run and (not gti_path.exists() or gti_path.stat().st_size == 0):
+            raise FileNotFoundError(
+                f"GTI file for {inst!r} does not exist or is empty: {gti_path}"
+            )
+        gti_files[inst] = gti_path
+    return gti_files
+
+
+def _discover_eimageget_outputs(
+    band_dir: Path,
+    inst: str,
+    *,
+    pre_existing: set[str] | None = None,
+) -> list[Path]:
+    """Discover ``eimageget`` FITS outputs in ``band_dir`` for ``inst``."""
+    if not band_dir.exists():
+        return []
+
+    ima_files = sorted(
+        p for p in band_dir.glob("*_ima_*.fits") if p.is_file() and p.stat().st_size > 0
+    )
+    if pre_existing is not None:
+        newly_created = [p for p in ima_files if p.name not in pre_existing]
+        if newly_created:
+            return newly_created
+
+    token = _INST_PRODUCT_TOKENS.get(inst, inst.upper())
+    return [p for p in ima_files if token in p.name]
+
+
+def _discover_combined_subband_pairs(
+    band_dir: Path, prefix: str
+) -> tuple[list[tuple[Path, Path]], Path | None]:
+    """Discover ``eimagecombine`` ``<prefix>ima_<i>_sub.fits`` + ``exp.fits`` pairs."""
+    if not band_dir.exists():
+        return [], None
+
+    pat = re.compile(rf"^{re.escape(prefix)}ima_(\d+)_sub\.fits$")
+    indexed: list[tuple[int, Path, Path]] = []
+    for p in band_dir.iterdir():
+        if not p.is_file() or p.stat().st_size == 0:
+            continue
+        m = pat.match(p.name)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        exp_path = band_dir / f"{prefix}ima_{idx}exp.fits"
+        if exp_path.is_file() and exp_path.stat().st_size > 0:
+            indexed.append((idx, p, exp_path))
+
+    indexed.sort(key=lambda item: item[0])
+    pairs = [(sub_p, exp_p) for _, sub_p, exp_p in indexed]
+    mask_cand = band_dir / f"{prefix}ima_mask.fits"
+    mask_path = (
+        mask_cand if mask_cand.is_file() and mask_cand.stat().st_size > 0 else None
+    )
+    return pairs, mask_path
+
+
+def _merge_subband_sub_exp_images(
+    subband_pairs: list[tuple[Path, Path]],
+    mask_path: Path | None,
+    out_path: Path,
+) -> Path:
+    """Compute exposure-corrected rate ``sum_i (C_i / E_i)`` across sub-bands."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mask_valid: np.ndarray | None = None
+    if mask_path is not None:
+        with fits.open(mask_path) as mhdul:
+            mdata = np.asarray(mhdul[0].data, dtype=np.float64)
+            mask_valid = np.isfinite(mdata) & (mdata > 0)
+
+    total: np.ndarray | None = None
+    header: fits.Header | None = None
+
+    for sub_path, exp_path in subband_pairs:
+        with fits.open(sub_path) as shdul, fits.open(exp_path) as ehdul:
+            counts = np.asarray(shdul[0].data, dtype=np.float64)
+            exp = np.asarray(ehdul[0].data, dtype=np.float64)
+            if header is None:
+                header = shdul[0].header.copy()
+                total = np.zeros_like(counts, dtype=np.float64)
+
+            valid = np.isfinite(counts) & np.isfinite(exp) & (exp > 0)
+            if mask_valid is not None and mask_valid.shape == valid.shape:
+                valid &= mask_valid
+            assert total is not None
+            total[valid] += counts[valid] / exp[valid]
+
+    assert total is not None and header is not None
+    header["BUNIT"] = ("counts/s", "Exposure-corrected background-subtracted rate")
+    header.add_history(
+        "Computed sum_i(sub_i / exp_i) from eimagecombine outputs: "
+        + ", ".join(sub_p.name for sub_p, _ in subband_pairs)
+    )
+    fits.PrimaryHDU(data=total.astype(np.float32), header=header).writeto(
+        out_path, overwrite=True
+    )
+    return out_path
+
+
+def _read_log_tail(log_path: Path, limit: int = 1500) -> str:
+    if not log_path.exists():
+        return ""
+    return log_path.read_text(encoding="utf-8", errors="replace")[-limit:]
+
+
 def _all_nonempty(paths: dict[str, Path]) -> bool:
     return bool(paths) and all(
         p.exists() and p.stat().st_size > 0 for p in paths.values()
@@ -121,7 +301,7 @@ def run_quick_image(
     force: bool = False,
     docker_container: str | None = None,
 ) -> QuickImageResult:
-    """Generate QPB-subtracted, exposure-corrected flux images via ``evqpb`` + ``eimageget``."""
+    """Generate QPB-subtracted, exposure-corrected flux images via ``evqpb`` + ``eimageget`` + ``eimagecombine``."""
     qi = cfg.quick_image
     qdir = cfg.paths.resolve(qi.dir)
     work_dir = qdir / "_work"
@@ -132,8 +312,10 @@ def run_quick_image(
         if _all_nonempty(existing.band_flux_images):
             return existing
 
+    raw_events, pn_oot_path = _resolve_raw_events(cfg, dry_run=dry_run)
+    active_insts = [k for k in ("mos1", "mos2", "pn") if k in raw_events]
     flare_res = flare if flare is not None else load_flare_result(cfg)
-    mask_res = load_source_mask_result(cfg) if qi.use_cheese_mask else None
+    gti_files = _resolve_gti_files(cfg, active_insts, flare_res, dry_run=dry_run)
 
     runner = SASRunner(
         env=cfg.env,
@@ -144,14 +326,12 @@ def run_quick_image(
 
     attfile = _resolve_attfile(cfg, work_dir, runner, dry_run=dry_run, force=force)
 
-    # 1. Generate QPB event lists once per active instrument
+    # 1. Generate QPB/FWC event lists once per active instrument from raw events
     qpb_files: dict[str, Path] = {}
-    active_insts = [k for k in ("mos1", "mos2", "pn") if k in flare_res.clean_events]
     for inst in active_insts:
-        evt_path = flare_res.clean_events[inst]
         qpb_name = f"{inst}_qpb.fits"
         qpb_params: dict[str, Any] = {
-            "table": evt_path,
+            "table": raw_events[inst],
             "attfile": attfile,
             "outset": qpb_name,
         }
@@ -170,94 +350,121 @@ def run_quick_image(
         )
         qpb_files[inst] = work_dir / qpb_name
 
-    # 2. Run eimageget per narrow sub-band and combine into target band flux images
+    # 2. Run eimageget (all sub-bands per instrument) + eimagecombine per target band
     band_flux_images: dict[str, Path] = {}
     subband_count_images: dict[str, list[Path]] = {}
 
     for band_name, band in qi.bands.items():
         subbands = resolve_subbands(band, qi.default_subband_edges)
-        sub_count_imgs: list[Path] = []
-        sub_exp_imgs: list[Path] = []
-        sub_bkg_imgs: list[Path] = []
+        pimin_list = [lo for lo, _ in subbands]
+        pimax_list = [hi for _, hi in subbands]
+        band_dir = work_dir / band_name
+        if force and not dry_run and band_dir.exists():
+            shutil.rmtree(band_dir)
+        band_outputs: list[Path] = []
 
-        for lo, hi in subbands:
-            sub_dir = work_dir / f"{band_name}_{lo}_{hi}"
-            for inst in active_insts:
-                evt_path = flare_res.clean_events[inst]
-                qpb_path = qpb_files[inst]
-                prefix = f"{inst}_{lo}_{hi}"
-                cnt_name = f"{prefix}_image.fits"
-                exp_name = f"{prefix}_exp.fits"
-                bkg_name = f"{prefix}_bkg.fits"
+        for inst in active_insts:
+            existing_ima = (
+                [] if force or dry_run else _discover_eimageget_outputs(band_dir, inst)
+            )
+            if existing_ima:
+                band_outputs.extend(existing_ima)
+                continue
 
-                eimg_params: dict[str, Any] = {
-                    "evtfile": evt_path,
-                    "qpbfile": qpb_path,
-                    "attfile": attfile,
-                    "pimin": lo,
-                    "pimax": hi,
-                    "ximagebinsize": qi.bin_size,
-                    "yimagebinsize": qi.bin_size,
-                    "withvignetting": qi.with_vignetting,
-                    "withexposure": True,
-                    "outimage": cnt_name,
-                    "outexp": exp_name,
-                    "outqpb": bkg_name,
-                }
-                if inst == "pn" and "pn_oot" in flare_res.clean_events:
-                    eimg_params["ootfile"] = flare_res.clean_events["pn_oot"]
-                if mask_res is not None and inst in mask_res.cheese_masks:
-                    eimg_params["withmask"] = True
-                    eimg_params["maskfile"] = mask_res.cheese_masks[inst]
-                eimg_params.update(qi.eimageget_extra_params)
+            pre_existing = (
+                {p.name for p in band_dir.iterdir()} if band_dir.exists() else set()
+            )
+            eimg_params: dict[str, Any] = {
+                "evtfile": raw_events[inst],
+                "fwcfile": qpb_files[inst],
+                "gtifile": gti_files[inst],
+                "attfile": attfile,
+                "pimin": pimin_list,
+                "pimax": pimax_list,
+                "ximagebinsize": qi.bin_size,
+                "yimagebinsize": qi.bin_size,
+                "withexposure": True,
+                "withfwcimages": True,
+                "withmask": True,
+            }
+            if inst == "pn" and pn_oot_path is not None:
+                eimg_params["ootfile"] = pn_oot_path
+            eimg_params.update(qi.eimageget_extra_params)
 
-                runner.run(
-                    SASCommand(
-                        program="eimageget",
-                        cwd=sub_dir,
-                        params=eimg_params,
-                        core_outputs=[cnt_name, exp_name, bkg_name],
-                        intermediate_dir=None,
-                        log_file=f"{inst}_eimageget.log",
-                    ),
-                    force=force,
+            log_name = f"{inst}_eimageget.log"
+            runner.run(
+                SASCommand(
+                    program="eimageget",
+                    cwd=band_dir,
+                    params=eimg_params,
+                    core_outputs=[],
+                    intermediate_dir=None,
+                    log_file=log_name,
+                ),
+                force=force,
+            )
+
+            if not dry_run:
+                produced = _discover_eimageget_outputs(
+                    band_dir, inst, pre_existing=pre_existing
                 )
-                sub_count_imgs.append(sub_dir / cnt_name)
-                sub_exp_imgs.append(sub_dir / exp_name)
-                sub_bkg_imgs.append(sub_dir / bkg_name)
+                if not produced:
+                    tail = _read_log_tail(band_dir / log_name)
+                    raise SASCommandError(
+                        f"eimageget finished for {inst} ({band_name}) but no "
+                        f"'*_ima_*.fits' outputs were found in {band_dir}.\n"
+                        f"Log: {band_dir / log_name}\n{tail}"
+                    )
+                band_outputs.extend(produced)
 
-        subband_count_images[band_name] = sub_count_imgs
+        subband_count_images[band_name] = band_outputs
 
-        # Combine sub-bands (and instruments) into final target band flux image
-        out_prefix = f"{band_name}_{band.emin}_{band.emax}"
-        flux_name = f"{out_prefix}_flux.fits"
-        comb_cnt = f"{out_prefix}_counts.fits"
-        comb_exp = f"{out_prefix}_exp.fits"
-        comb_bkg = f"{out_prefix}_bkg.fits"
+        # 3. Combine instruments per sub-band in band_dir via eimagecombine
+        out_prefix = f"{band_name}_{band.emin}_{band.emax}_"
+        flux_name = f"{band_name}_{band.emin}_{band.emax}_flux.fits"
+        flux_path = qdir / flux_name
 
         comb_params: dict[str, Any] = {
-            "images": sub_count_imgs,
-            "exposures": sub_exp_imgs,
-            "backgrounds": sub_bkg_imgs,
-            "outimage": comb_cnt,
-            "outexposure": comb_exp,
-            "outbackground": comb_bkg,
-            "outflux": flux_name,
+            "prefix": out_prefix,
+            "withcheckinput": True,
+            "withaddimages": True,
+            "withcombineimages": True,
+            "withasmooth": qi.with_asmooth,
+            "keepinterstage": True,
         }
         comb_params.update(qi.eimagecombine_extra_params)
 
-        runner.run(
-            SASCommand(
-                program="eimagecombine",
-                cwd=qdir,
-                params=comb_params,
-                core_outputs=[flux_name],
-                intermediate_dir="_intermediate",
-                log_file=f"{out_prefix}_combine.log",
-            ),
-            force=force,
+        combine_log = f"{band_name}_combine.log"
+        existing_pairs, _ = (
+            ([], None)
+            if force or dry_run
+            else _discover_combined_subband_pairs(band_dir, out_prefix)
         )
-        band_flux_images[band_name] = qdir / flux_name
+        if not existing_pairs:
+            runner.run(
+                SASCommand(
+                    program="eimagecombine",
+                    cwd=band_dir,
+                    params=comb_params,
+                    core_outputs=[],
+                    intermediate_dir=None,
+                    log_file=combine_log,
+                ),
+                force=force,
+            )
+
+        if not dry_run:
+            pairs, mask_path = _discover_combined_subband_pairs(band_dir, out_prefix)
+            if not pairs:
+                tail = _read_log_tail(band_dir / combine_log)
+                raise SASCommandError(
+                    f"eimagecombine finished for {band_name} but no "
+                    f"'{out_prefix}ima_<i>_sub.fits' + 'exp.fits' pairs were "
+                    f"found in {band_dir}.\nLog: {band_dir / combine_log}\n{tail}"
+                )
+            _merge_subband_sub_exp_images(pairs, mask_path, flux_path)
+
+        band_flux_images[band_name] = flux_path
 
     result = QuickImageResult(
         quick_image_dir=qdir,

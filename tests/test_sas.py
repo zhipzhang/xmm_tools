@@ -171,6 +171,37 @@ class TestSASCommandAndRunner(unittest.TestCase):
                     )
                 )
 
+    def test_runner_isolates_heasoft_pfiles_per_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+            script = "import os; print('PFILES=' + os.environ.get('PFILES', ''))"
+
+            class _PrintPfilesCmd(SASCommand):
+                def argv(self) -> list[str]:
+                    return [sys.executable, "-c", script]
+
+            env = SASEnv(
+                extra_env={"PFILES": "/home/xmmsas/pfiles;/usr/local/heasoft/syspfiles"}
+            )
+            runner = SASRunner(env=env, skip_if_exists=False)
+            res = runner.run(
+                _PrintPfilesCmd(
+                    program="mock_sas",
+                    cwd=work_dir,
+                    core_outputs=[],
+                    intermediate_dir=None,
+                )
+            )
+            log_text = res.log_path.read_text(encoding="utf-8").strip()
+            self.assertTrue(log_text.startswith("PFILES="))
+            pfiles_val = log_text.split("=", 1)[1]
+            user_dir, sys_dir = pfiles_val.split(";", 1)
+            self.assertEqual(sys_dir, "/usr/local/heasoft/syspfiles")
+            self.assertNotEqual(user_dir, "/home/xmmsas/pfiles")
+            self.assertIn("xmm_pfiles_", user_dir)
+            # Temporary pfiles directory is cleaned up after subprocess exits
+            self.assertFalse(Path(user_dir).exists())
+
     def test_docker_exec_argv(self):
         env = SASEnv(sas_ccf="/ccf.cif")
         runner = SASRunner(env=env, docker_container="xmmsas_box")
