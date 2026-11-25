@@ -78,19 +78,28 @@ class TestESASSpectrum(unittest.TestCase):
             clean_events=clean_events,
             flag_filtered=True,
         )
-        masks = {
-            "mos1_det": _touch(cdir / "mos1S001-bkgregtdet.fits"),
-            "mos1_sky": _touch(cdir / "mos1S001-bkgregtsky.fits"),
-            "mos2_det": _touch(cdir / "mos2S002-bkgregtdet.fits"),
-            "mos2_sky": _touch(cdir / "mos2S002-bkgregtsky.fits"),
-            "pn_det": _touch(cdir / "pnS003-bkgregtdet.fits"),
-            "pn_sky": _touch(cdir / "pnS003-bkgregtsky.fits"),
+        cheese_masks = {
+            "mos1": _touch(cdir / "mos1S001-cheeset.fits"),
+            "mos2": _touch(cdir / "mos2S002-cheeset.fits"),
+            "pn": _touch(cdir / "pnS003-cheeset.fits"),
+        }
+        region_det = {
+            "mos1": _touch(cdir / "mos1S001-bkgregtdet.fits"),
+            "mos2": _touch(cdir / "mos2S002-bkgregtdet.fits"),
+            "pn": _touch(cdir / "pnS003-bkgregtdet.fits"),
+        }
+        region_sky = {
+            "mos1": _touch(cdir / "mos1S001-bkgregtsky.fits"),
+            "mos2": _touch(cdir / "mos2S002-bkgregtsky.fits"),
+            "pn": _touch(cdir / "pnS003-bkgregtsky.fits"),
         }
         mask_res = SourceMaskResult(
             cheese_dir=cdir,
             manifest_path=cdir / "manifest.json",
             method="cheese",
-            cheese_masks=masks,
+            cheese_masks=cheese_masks,
+            region_det=region_det,
+            region_sky=region_sky,
         )
         return cfg, flare, mask_res
 
@@ -202,6 +211,12 @@ class TestESASSpectrum(unittest.TestCase):
             self.assertIn("||", bkg_expr)
             self.assertTrue(bkg_expr.startswith("&&("))
 
+            # Verify maskdet / masksky from SourceMaskResult.region_det / region_sky were passed
+            mos_calls = [p for prog, _, p in calls if prog == "mosspectra"]
+            pn_calls = [p for prog, _, p in calls if prog == "pnspectra"]
+            self.assertTrue(mos_calls and all("maskdet" in p and "masksky" in p for p in mos_calls))
+            self.assertTrue(pn_calls and all("maskdet" in p and "masksky" in p for p in pn_calls))
+
             # Manifest roundtrip
             loaded = load_spectrum_result(cfg)
             self.assertEqual(set(loaded.regions.keys()), set(res.regions.keys()))
@@ -264,6 +279,29 @@ class TestESASSpectrum(unittest.TestCase):
             r2_dirs_after = [cwd for _, cwd, _ in calls3 if cwd.name == "r2"]
             self.assertTrue(len(r1_dirs_after) > 0)
             self.assertEqual(r2_dirs_after, [])
+
+    def test_dry_run_skips_disk_writes_and_handles_ellipse_box(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg, flare, mask_res = self._setup_workspace(root)
+
+            reg = root / "mixed.reg"
+            reg.write_text(
+                "# Region file format: DS9 version 4.1\n"
+                "fk5\n"
+                "ellipse(287.90,4.95,120\",80\",30) # text={ell}\n"
+                "box(287.9565,4.9827,60\",30\",15) # text={box1}\n",
+                encoding="utf-8",
+            )
+            cfg.spectrum.regions = [
+                SpectrumRegionSpec(name="mixed", file=str(reg), mode="split"),
+            ]
+
+            res = run_spectrum(cfg, flare=flare, mask_res=mask_res, dry_run=True)
+            self.assertEqual(set(res.regions.keys()), {"mixed/ell", "mixed/box1"})
+            for r in res.regions.values():
+                self.assertFalse(r.region_dir.exists())
+            self.assertFalse(res.manifest_path.exists())
 
     def test_regions_path_fallback_on_import_error(self):
         import builtins

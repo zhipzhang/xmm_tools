@@ -156,7 +156,13 @@ class SpectrumDataset:
         )
         if resolved_diag is not None:
             diag_rmf = sh["read_rmf"](str(resolved_diag))
-            diag_rmf.offset = getattr(rmf, "offset", 1)
+            f_chan = getattr(diag_rmf, "f_chan", None)
+            if f_chan is not None and len(f_chan) > 0:
+                min_chan = int(np.min(f_chan))
+                if min_chan == 0:
+                    diag_rmf.offset = 0
+                elif getattr(diag_rmf, "offset", 1) == 0 and min_chan >= 1:
+                    diag_rmf.offset = 1
             if diag_rmf.detchans != rmf.detchans and diag_rmf_path is None:
                 diag_rmf = make_diagonal_rmf(rmf)
         else:

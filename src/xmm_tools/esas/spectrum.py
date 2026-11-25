@@ -675,17 +675,33 @@ def _run_single_region_job(
     force: bool,
 ) -> RegionSpectrumResult:
     rdir = job.region_dir
+    active_insts = [i for i in ("mos1", "mos2", "pn") if i in clean_events]
+    if dry_run:
+        return RegionSpectrumResult(
+            key=job.key,
+            group=job.group,
+            label=job.label,
+            mode=job.mode,
+            region_dir=rdir,
+            source_file=job.source_file,
+            elow=job.elow,
+            ehigh=job.ehigh,
+            instruments={
+                inst: InstrumentProducts(region_file=rdir / f"reg_{inst}.txt")
+                for inst in active_insts
+            },
+        )
+
     rdir.mkdir(parents=True, exist_ok=True)
     log_dir = rdir / "_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Save provenance region.reg when split from a multi-region file
-    if job.sky_regions and job.mode == "split" and not dry_run:
+    if job.sky_regions and job.mode == "split":
         Regions, *_ = _import_regions()
         Regions(job.sky_regions).write(str(rdir / "region.reg"), format="ds9", overwrite=True)
 
     # Symlink event lists and optional cheese masks into region_dir
-    active_insts = [i for i in ("mos1", "mos2", "pn") if i in clean_events]
     local_events: dict[str, Path] = {}
     for inst in active_insts:
         src_evt = clean_events[inst]
@@ -699,10 +715,12 @@ def _run_single_region_job(
     local_masks_sky: dict[str, Path] = {}
     if spec_cfg.withsrcrem and mask_res is not None:
         for inst in active_insts:
-            for suffix, store in (("det", local_masks_det), ("sky", local_masks_sky)):
-                key = f"{inst}_{suffix}"
-                if key in mask_res.cheese_masks:
-                    src_m = mask_res.cheese_masks[key]
+            for suffix, reg_map, store in (
+                ("det", mask_res.region_det, local_masks_det),
+                ("sky", mask_res.region_sky, local_masks_sky),
+            ):
+                src_m = reg_map.get(inst) or mask_res.cheese_masks.get(f"{inst}_{suffix}")
+                if src_m is not None:
                     dst_m = rdir / src_m.name
                     _symlink_relative(src_m, dst_m)
                     store[inst] = dst_m

@@ -486,10 +486,12 @@ def _draw_sidebar(state: ImageViewerState) -> None:
         imgui.same_line()
         imgui.text_disabled("(drag dots on image)")
 
-        _, sp.width_arcsec = imgui.slider_float("Bin Width (\")", sp.width_arcsec, 4.0, 200.0, "%.1f")
+        ch_w, sp.width_arcsec = imgui.slider_float("Bin Width (\")", sp.width_arcsec, 4.0, 200.0, "%.1f")
         _, sp.height_arcsec = imgui.slider_float("Bin Height (\")", sp.height_arcsec, 4.0, 400.0, "%.1f")
-        _, sp.gap_arcsec = imgui.slider_float("Gap (\")", sp.gap_arcsec, 0.0, 100.0, "%.1f")
-        _, sp.count = imgui.slider_int("Count", sp.count, 1, 40)
+        ch_g, sp.gap_arcsec = imgui.slider_float("Gap (\")", sp.gap_arcsec, 0.0, 100.0, "%.1f")
+        ch_c, sp.count = imgui.slider_int("Count", sp.count, 1, 40)
+        if ch_w or ch_g or ch_c:
+            state.strip_end_sky = None
         _, sp.prefix = imgui.input_text("Prefix", sp.prefix)
 
         if imgui.tree_node("Axis Coordinates"):
@@ -904,23 +906,28 @@ def _draw_image_canvas(state: ImageViewerState) -> None:
         implot.Flags_.equal | implot.Flags_.no_legend,
     ):
         implot.setup_axes("X (pix)", "Y (pix)")
-        implot.setup_axis_limits(implot.ImAxis_.x1, 0.0, float(nx), implot.Cond_.once)
-        implot.setup_axis_limits(implot.ImAxis_.y1, 0.0, float(ny), implot.Cond_.once)
+        implot.setup_axis_limits(
+            implot.ImAxis_.x1, -0.5, float(nx) - 0.5, implot.Cond_.once
+        )
+        implot.setup_axis_limits(
+            implot.ImAxis_.y1, -0.5, float(ny) - 0.5, implot.Cond_.once
+        )
         implot.plot_heatmap(
             "##heatmap",
             display,
             0.0,
             1.0,
             "",
-            implot.Point(0.0, 0.0),
-            implot.Point(float(nx), float(ny)),
+            implot.Point(-0.5, -0.5),
+            implot.Point(float(nx) - 0.5, float(ny) - 0.5),
         )
 
         _draw_region_overlays(state)
 
         if implot.is_plot_hovered():
             mouse = implot.get_plot_mouse_pos()
-            ix, iy = int(mouse.x), int(mouse.y)
+            ix = int(np.floor(mouse.x + 0.5))
+            iy = int(np.floor(mouse.y + 0.5))
             if 0 <= ix < nx and 0 <= iy < ny:
                 smoothed = state.get_smoothed_data()
                 val = float(smoothed[iy, ix]) if smoothed is not None else float("nan")

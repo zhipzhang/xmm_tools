@@ -263,6 +263,11 @@ class TestSherpaOOP(unittest.TestCase):
                 "east_jet/e4.mos1.soft_proton.sp.gamma",
                 "background.mos1.soft_proton.sp.gamma",
             )
+            with self.assertRaises(KeyError):
+                session.link(
+                    "east_jet/e4.nonexistent.sp.gamma",
+                    "background.mos1.soft_proton.sp.gamma",
+                )
             audit = session.audit_parameters()
             self.assertTrue(len(audit["free"]) > 0)
             self.assertEqual(len(audit["linked"]), 1)
@@ -290,6 +295,21 @@ class TestSherpaOOP(unittest.TestCase):
             )
             self.assertTrue(plot_file.exists() and plot_file.stat().st_size > 0)
             plt.close(fig)
+
+            # Verify per_kev=False switches extracted data/model from rate to counts
+            from xmm_tools.sherpa.plotting import _extract_binned_spectrum
+
+            ds_e4 = col["east_jet/e4", "mos1"]
+            mdl_e4 = session.model("east_jet/e4", "mos1", "source_emission")
+            _, _, y_rate, _, ym_rate = _extract_binned_spectrum(
+                ds_e4, mdl_e4, per_kev=True
+            )
+            _, _, y_cnts, _, ym_cnts = _extract_binned_spectrum(
+                ds_e4, mdl_e4, per_kev=False
+            )
+            self.assertFalse(np.allclose(y_rate, y_cnts))
+            self.assertFalse(np.allclose(ym_rate, ym_cnts))
+            self.assertTrue(ds_e4.pha.rate)
 
             # Roundtrip FitReport.from_json and explicit component/parameter access
             from xmm_tools.sherpa import FitReport

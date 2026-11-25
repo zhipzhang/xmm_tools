@@ -519,10 +519,17 @@ class JointFitSession:
         if len(tokens) == 4:
             reg, comp, tag, pname = tokens
             inst = next(
-                ds.instrument
-                for ds in self.collection.by_region(reg)
-                if comp in self.parts[ds.ds_id] and tag in self.parts[ds.ds_id][comp]
+                (
+                    ds.instrument
+                    for ds in self.collection.by_region(reg)
+                    if comp in self.parts[ds.ds_id] and tag in self.parts[ds.ds_id][comp]
+                ),
+                None,
             )
+            if inst is None:
+                raise KeyError(
+                    f"Component '{comp}.{tag}' not found in region {reg!r} (path={path!r})"
+                )
         elif len(tokens) == 5:
             reg, inst, comp, tag, pname = tokens
         else:

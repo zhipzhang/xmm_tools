@@ -33,12 +33,14 @@ def _extract_binned_spectrum(
     from sherpa.astro.plot import DataPHAPlot, ModelPHAHistogram
 
     dplot = DataPHAPlot()
-    dplot.histo_prefs["rate"] = per_kev
-    dplot.prepare(ds.pha)
-
     mplot = ModelPHAHistogram()
-    mplot.histo_prefs["rate"] = per_kev
-    mplot.prepare(ds.pha, model)
+    orig_rate = getattr(ds.pha, "rate", True)
+    try:
+        ds.pha.rate = per_kev
+        dplot.prepare(ds.pha)
+        mplot.prepare(ds.pha, model)
+    finally:
+        ds.pha.rate = orig_rate
 
     x_mid = np.asarray(dplot.x, dtype=float)
     x_half = (
