@@ -173,6 +173,17 @@ class QPBImageConfig:
     dir: str = "qpb_image"
     bin_size: int = 50
     with_asmooth: bool = False
+    ecut: float = 1000.0
+    epn_weight: float = 1.0
+    em1_weight: float = 0.4
+    em2_weight: float = 0.4
+    smoothstyle: str = "simple"
+    convolverstyle: str = "gaussian"
+    width: float = 5.0
+    minwidth: float = 0.0
+    maxwidth: float = 10.0
+    desiredsnr: float = 10.0
+    nconvolvers: int = 20
     attfile: str = ""
     gti_files: dict[str, str] = field(default_factory=dict)
     default_subband_edges: list[int] = field(
@@ -348,6 +359,17 @@ class AnaConfig:
             dir=paths.qpb_image_dir,
             bin_size=int(qi_sec.get("bin_size", 50)),
             with_asmooth=bool(qi_sec.get("with_asmooth", False)),
+            ecut=float(qi_sec.get("ecut", 1000.0)),
+            epn_weight=float(qi_sec.get("epn_weight", 1.0)),
+            em1_weight=float(qi_sec.get("em1_weight", 0.4)),
+            em2_weight=float(qi_sec.get("em2_weight", 0.4)),
+            smoothstyle=str(qi_sec.get("smoothstyle", "simple")),
+            convolverstyle=str(qi_sec.get("convolverstyle", "gaussian")),
+            width=float(qi_sec.get("width", 5.0)),
+            minwidth=float(qi_sec.get("minwidth", 0.0)),
+            maxwidth=float(qi_sec.get("maxwidth", 10.0)),
+            desiredsnr=float(qi_sec.get("desiredsnr", 10.0)),
+            nconvolvers=int(qi_sec.get("nconvolvers", 20)),
             attfile=str(qi_sec.get("attfile", "")),
             gti_files=qi_gti_files,
             default_subband_edges=[
@@ -424,6 +446,17 @@ pn_oot = "{pn_oot}"           # Standardized PN Out-of-Time event file
 [sas.qpb_image]
 bin_size = 50                        # Spatial pixel bin size (50 physical units = 2.5 arcsec/pix)
 with_asmooth = false                 # Run eimagecombine asmooth (false = keep unsmoothed sub/exp maps)
+ecut = 1000.0                        # Minimum combined exposure threshold (s) for eimagecombine mask
+epn_weight = 1.0                     # EPIC-pn exposure weight in eimagecombine
+em1_weight = 0.4                     # EPIC-MOS1 exposure weight in eimagecombine
+em2_weight = 0.4                     # EPIC-MOS2 exposure weight in eimagecombine
+smoothstyle = "simple"               # asmooth style when with_asmooth = true ("simple" | "adaptive")
+convolverstyle = "gaussian"          # asmooth kernel ("gaussian" | "tophat" | "squarebox")
+width = 5.0                          # Simple smoothing kernel width (pixels)
+minwidth = 0.0                       # Adaptive smoothing min kernel width (pixels)
+maxwidth = 10.0                      # Adaptive smoothing max kernel width (pixels)
+desiredsnr = 10.0                    # Adaptive smoothing target SNR
+nconvolvers = 20                     # Number of adaptive smoothing convolvers
 attfile = ""                         # Attitude FITS file (empty = reuse atthk.fits or run atthkgen)
 default_subband_edges = [350, 500, 750, 1000, 1500, 2000, 3000, 4500, 7000, 10000]
 evqpb_extra_params = {{}}              # Extra key=value parameters passed through to evqpb

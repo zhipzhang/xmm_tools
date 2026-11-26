@@ -146,6 +146,15 @@ class TestESASQuickImage(unittest.TestCase):
             manifest = json.loads(res.manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["stage"], "qpb_image")
             self.assertEqual(manifest["band_flux_images"]["soft"], "soft_500_2000_flux.fits")
+            self.assertIn("soft", res.bands)
+            self.assertEqual(len(res.bands["soft"].subbands), 2)
+            self.assertTrue(res.bands["soft"].mask_image.is_file())
+            self.assertEqual(res.bands["soft"].subbands[0].counts_image.name, "soft_500_1000_counts.fits")
+            self.assertEqual(res.bands["soft"].subbands[0].exposure_image.name, "soft_500_1000_exp.fits")
+            reloaded = type(res).from_manifest(res.manifest_path)
+            self.assertEqual(len(reloaded.bands["soft"].subbands), 2)
+            self.assertEqual(reloaded.bands["soft"].subbands[1].emin, 1000)
+            self.assertEqual(reloaded.bands["soft"].subbands[1].emax, 2000)
 
             # Re-running without force skips via manifest.json
             calls.clear()
@@ -201,12 +210,13 @@ class TestESASQuickImage(unittest.TestCase):
                     (cmd.cwd_path / f"{tag}_ima_0.fits").write_text("ima", encoding="utf-8")
                 elif cmd.program == "eimagecombine":
                     prefix = cmd.params["prefix"]
-                    fits.PrimaryHDU(data=np.ones((2, 2), dtype=np.float32)).writeto(
-                        cmd.cwd_path / f"{prefix}ima_0_sub.fits", overwrite=True
-                    )
-                    fits.PrimaryHDU(data=np.ones((2, 2), dtype=np.float32)).writeto(
-                        cmd.cwd_path / f"{prefix}ima_0exp.fits", overwrite=True
-                    )
+                    for idx in (0, 1):
+                        fits.PrimaryHDU(data=np.ones((2, 2), dtype=np.float32)).writeto(
+                            cmd.cwd_path / f"{prefix}ima_{idx}_sub.fits", overwrite=True
+                        )
+                        fits.PrimaryHDU(data=np.ones((2, 2), dtype=np.float32)).writeto(
+                            cmd.cwd_path / f"{prefix}ima_{idx}exp.fits", overwrite=True
+                        )
                 else:
                     for out in cmd.core_outputs:
                         (cmd.cwd_path / out).write_text("fits", encoding="utf-8")
@@ -217,6 +227,72 @@ class TestESASQuickImage(unittest.TestCase):
 
             self.assertEqual(seen_gtis[:3], ["mos1.gti", "mos2.gti", "pn.gti"])
             self.assertTrue(res.band_flux_images["soft"].exists())
+
+    def test_eimagecombine_isolated_dir_and_validation(self):
+        from xmm_tools.exec.runner import SASCommandError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_raw_events(root)
+            toml_path = root / "esas.toml"
+            toml_path.write_text(render_template_toml(workdir="."), encoding="utf-8")
+            cfg = AnaConfig.from_toml(toml_path)
+            flare = self._write_flare_with_gti(cfg)
+
+            combine_cwds: list[Path] = []
+
+            def fake_run_incomplete(self, cmd, *, force=False):
+                cmd.cwd_path.mkdir(parents=True, exist_ok=True)
+                if cmd.program == "eimageget":
+                    tag = Path(cmd.params["evtfile"]).stem
+                    for idx in (0, 1):
+                        (cmd.cwd_path / f"{tag}_ima_{idx}.fits").write_text("ima", encoding="utf-8")
+                elif cmd.program == "eimagecombine":
+                    combine_cwds.append(cmd.cwd_path)
+                    prefix = cmd.params["prefix"]
+                    # Only write sub-band 1 (missing sub-band 0)
+                    fits.PrimaryHDU(data=np.ones((2, 2), dtype=np.float32)).writeto(
+                        cmd.cwd_path / f"{prefix}ima_1_sub.fits", overwrite=True
+                    )
+                    fits.PrimaryHDU(data=np.ones((2, 2), dtype=np.float32)).writeto(
+                        cmd.cwd_path / f"{prefix}ima_1exp.fits", overwrite=True
+                    )
+                else:
+                    for out in cmd.core_outputs:
+                        (cmd.cwd_path / out).write_text("fits", encoding="utf-8")
+                return RunResult(command=cmd, status="completed", returncode=0)
+
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run_incomplete):
+                with self.assertRaises(SASCommandError) as ctx:
+                    run_qpb_image(cfg, flare=flare)
+            self.assertIn("incomplete sub-bands", str(ctx.exception))
+            self.assertEqual(len(combine_cwds), 1)
+            self.assertNotEqual(combine_cwds[0], cfg.paths.resolve("qpb_image/_work/soft"))
+
+            # Also fail fast when combine_log reports cp skipping file
+            def fake_run_log_error(self, cmd, *, force=False):
+                cmd.cwd_path.mkdir(parents=True, exist_ok=True)
+                if cmd.program == "eimageget":
+                    tag = Path(cmd.params["evtfile"]).stem
+                    for idx in (0, 1):
+                        (cmd.cwd_path / f"{tag}_ima_{idx}.fits").write_text("ima", encoding="utf-8")
+                elif cmd.program == "eimagecombine":
+                    combine_cwds.append(cmd.cwd_path)
+                    (cmd.cwd_path / cmd.log_file).write_text(
+                        "cp: skipping file 'x_PN_ima_0_sub.fits', as it was replaced while being copied\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    for out in cmd.core_outputs:
+                        (cmd.cwd_path / out).write_text("fits", encoding="utf-8")
+                return RunResult(command=cmd, status="completed", returncode=0)
+
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run_log_error):
+                with self.assertRaises(SASCommandError) as ctx2:
+                    run_qpb_image(cfg, flare=flare, force=True)
+            self.assertIn("skipping file", str(ctx2.exception))
+            self.assertEqual(len(combine_cwds), 2)
+            self.assertNotEqual(combine_cwds[0], combine_cwds[1])
 
 
 if __name__ == "__main__":

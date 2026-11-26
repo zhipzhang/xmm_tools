@@ -11,11 +11,21 @@ from xmm_tools.sas.qpb_image import (
     resolve_subbands,
     run_qpb_image,
 )
+from xmm_tools.sas.qpb_products import (
+    BandImages,
+    Image2D,
+    QPBProducts,
+    SubbandImages,
+)
 
 __all__ = [
+    "BandImages",
+    "Image2D",
     "ODFInitResult",
     "QPBImageResult",
+    "QPBProducts",
     "STANDARD_EVENT_SPECS",
+    "SubbandImages",
     "initialize_observation",
     "resolve_subbands",
     "run_qpb_image",

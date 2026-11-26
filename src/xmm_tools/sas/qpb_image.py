@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import json
-from pathlib import Path
 import re
 import shutil
+import tempfile
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from astropy.io import fits
 import numpy as np
+from astropy.io import fits
 
 from xmm_tools.esas.flare import FlareResult, load_flare_result
 from xmm_tools.exec.command import SASCommand
@@ -34,6 +35,102 @@ _INST_PRODUCT_TOKENS: dict[str, str] = {
 
 
 @dataclass
+class SubbandCombinedProducts:
+    """Combined ``eimagecombine`` outputs for a single energy sub-band."""
+
+    index: int
+    emin: int
+    emax: int
+    counts_image: Path
+    exposure_image: Path
+    smoothed_flux_image: Path | None = None
+
+    def to_manifest_dict(self, base_dir: Path) -> dict[str, object]:
+        def _rel(p: Path) -> str:
+            return (
+                str(p.relative_to(base_dir)) if p.is_relative_to(base_dir) else str(p)
+            )
+
+        data: dict[str, object] = {
+            "index": self.index,
+            "emin": self.emin,
+            "emax": self.emax,
+            "counts_image": _rel(self.counts_image),
+            "exposure_image": _rel(self.exposure_image),
+        }
+        if self.smoothed_flux_image is not None:
+            data["smoothed_flux_image"] = _rel(self.smoothed_flux_image)
+        return data
+
+    @classmethod
+    def from_manifest_dict(
+        cls, base_dir: Path, raw: dict[str, Any]
+    ) -> SubbandCombinedProducts:
+        def _res(val: str) -> Path:
+            p = Path(val)
+            return p if p.is_absolute() else (base_dir / p)
+
+        smooth_raw = raw.get("smoothed_flux_image")
+        return cls(
+            index=int(raw["index"]),
+            emin=int(raw["emin"]),
+            emax=int(raw["emax"]),
+            counts_image=_res(str(raw["counts_image"])),
+            exposure_image=_res(str(raw["exposure_image"])),
+            smoothed_flux_image=_res(str(smooth_raw)) if smooth_raw else None,
+        )
+
+
+@dataclass
+class BandCombinedProducts:
+    """Structured combined outputs for one configured target energy band."""
+
+    band_name: str
+    emin: int
+    emax: int
+    flux_image: Path
+    mask_image: Path | None = None
+    subbands: list[SubbandCombinedProducts] = field(default_factory=list)
+
+    def to_manifest_dict(self, base_dir: Path) -> dict[str, object]:
+        def _rel(p: Path) -> str:
+            return (
+                str(p.relative_to(base_dir)) if p.is_relative_to(base_dir) else str(p)
+            )
+
+        data: dict[str, object] = {
+            "emin": self.emin,
+            "emax": self.emax,
+            "flux_image": _rel(self.flux_image),
+            "subbands": [sb.to_manifest_dict(base_dir) for sb in self.subbands],
+        }
+        if self.mask_image is not None:
+            data["mask_image"] = _rel(self.mask_image)
+        return data
+
+    @classmethod
+    def from_manifest_dict(
+        cls, base_dir: Path, band_name: str, raw: dict[str, Any]
+    ) -> BandCombinedProducts:
+        def _res(val: str) -> Path:
+            p = Path(val)
+            return p if p.is_absolute() else (base_dir / p)
+
+        mask_raw = raw.get("mask_image")
+        return cls(
+            band_name=band_name,
+            emin=int(raw["emin"]),
+            emax=int(raw["emax"]),
+            flux_image=_res(str(raw["flux_image"])),
+            mask_image=_res(str(mask_raw)) if mask_raw else None,
+            subbands=[
+                SubbandCombinedProducts.from_manifest_dict(base_dir, sb)
+                for sb in raw.get("subbands", [])
+            ],
+        )
+
+
+@dataclass
 class QPBImageResult(StageManifest):
     """Core artifacts produced by ``run_qpb_image``."""
 
@@ -42,6 +139,7 @@ class QPBImageResult(StageManifest):
     qpb_files: dict[str, Path] = field(default_factory=dict)
     band_flux_images: dict[str, Path] = field(default_factory=dict)
     subband_count_images: dict[str, list[Path]] = field(default_factory=dict)
+    bands: dict[str, BandCombinedProducts] = field(default_factory=dict)
 
     def to_manifest_dict(self) -> dict[str, object]:
         return {
@@ -54,17 +152,34 @@ class QPBImageResult(StageManifest):
                 for k, p in self.qpb_files.items()
             },
             "band_flux_images": relativize_manifest_paths(self.band_flux_images),
+            "bands": {
+                bname: bprod.to_manifest_dict(self.qpb_image_dir)
+                for bname, bprod in self.bands.items()
+            },
         }
 
     @classmethod
     def from_manifest(cls, manifest_path: Path) -> QPBImageResult:
         raw = read_manifest_json(manifest_path)
         qdir = manifest_path.parent
+        raw_bands = raw.get("bands", {})
+        bands = (
+            {
+                str(bname): BandCombinedProducts.from_manifest_dict(
+                    qdir, str(bname), bdict
+                )
+                for bname, bdict in raw_bands.items()
+                if isinstance(bdict, dict)
+            }
+            if isinstance(raw_bands, dict)
+            else {}
+        )
         return cls(
             qpb_image_dir=qdir,
             manifest_path=manifest_path,
             qpb_files=resolve_manifest_paths(qdir, raw, "qpb_files"),
             band_flux_images=resolve_manifest_paths(qdir, raw, "band_flux_images"),
+            bands=bands,
         )
 
 
@@ -271,6 +386,160 @@ def _merge_subband_sub_exp_images(
     return out_path
 
 
+def _run_eimagecombine_isolated(
+    runner: SASRunner,
+    band_dir: Path,
+    out_prefix: str,
+    comb_params: dict[str, Any],
+    combine_log: str,
+    *,
+    force: bool,
+    dry_run: bool,
+    docker_container: str | None,
+) -> None:
+    """Run ``eimagecombine`` in a unique local scratch dir to avoid VirtioFS races."""
+    if dry_run or docker_container is not None:
+        runner.run(
+            SASCommand(
+                program="eimagecombine",
+                cwd=band_dir,
+                params=comb_params,
+                core_outputs=[],
+                intermediate_dir=None,
+                log_file=combine_log,
+            ),
+            force=force,
+        )
+        return
+
+    band_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="xmm_eimagecombine_") as tmp_dir:
+        scratch_dir = Path(tmp_dir)
+        copied_inputs: set[str] = set()
+        for src in band_dir.iterdir():
+            if not src.is_file() or src.name.startswith(out_prefix):
+                continue
+            if "_ima_" in src.name:
+                shutil.copy2(src, scratch_dir / src.name)
+                copied_inputs.add(src.name)
+
+        try:
+            runner.run(
+                SASCommand(
+                    program="eimagecombine",
+                    cwd=scratch_dir,
+                    params=comb_params,
+                    core_outputs=[],
+                    intermediate_dir=None,
+                    log_file=combine_log,
+                ),
+                force=force,
+            )
+        finally:
+            log_src = scratch_dir / combine_log
+            if log_src.is_file():
+                shutil.copy2(log_src, band_dir / combine_log)
+            for out_file in scratch_dir.iterdir():
+                if not out_file.is_file() or out_file.name == combine_log:
+                    continue
+                if (
+                    out_file.name.startswith(out_prefix)
+                    or out_file.name not in copied_inputs
+                ):
+                    shutil.copy2(out_file, band_dir / out_file.name)
+
+
+def _validate_eimagecombine_outputs(
+    band_dir: Path,
+    band_name: str,
+    out_prefix: str,
+    combine_log: str,
+    expected_subbands: int,
+) -> tuple[list[tuple[Path, Path]], Path | None]:
+    """Verify ``eimagecombine`` log and sub-band pair completeness."""
+    log_path = band_dir / combine_log
+    if log_path.is_file():
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        for marker in ("ERROR:", "skipping file", "Error Status Returned"):
+            if marker in log_text:
+                tail = read_log_tail(log_path)
+                raise SASCommandError(
+                    f"eimagecombine reported an error ({marker!r}) for {band_name}.\n"
+                    f"Log: {log_path}\n{tail}"
+                )
+
+    pairs, mask_path = _discover_combined_subband_pairs(band_dir, out_prefix)
+    if not pairs:
+        tail = read_log_tail(log_path)
+        raise SASCommandError(
+            f"eimagecombine finished for {band_name} but no "
+            f"'{out_prefix}ima_<i>_sub.fits' + 'exp.fits' pairs were "
+            f"found in {band_dir}.\nLog: {log_path}\n{tail}"
+        )
+    if len(pairs) != expected_subbands:
+        tail = read_log_tail(log_path)
+        raise SASCommandError(
+            f"eimagecombine finished for {band_name} with incomplete sub-bands: "
+            f"expected {expected_subbands}, found {len(pairs)}.\n"
+            f"Log: {log_path}\n{tail}"
+        )
+    return pairs, mask_path
+
+
+def _export_band_products(
+    qdir: Path,
+    band_dir: Path,
+    band_name: str,
+    band: BandSpec,
+    subbands: list[tuple[int, int]],
+    pairs: list[tuple[Path, Path]],
+    mask_path: Path | None,
+    flux_path: Path,
+    out_prefix: str,
+) -> BandCombinedProducts:
+    """Copy combined per-subband outputs into ``qpb_image/<band_name>/``."""
+    export_dir = qdir / band_name
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    exported_mask: Path | None = None
+    if mask_path is not None and mask_path.is_file():
+        exported_mask = export_dir / f"{band_name}_{band.emin}_{band.emax}_mask.fits"
+        shutil.copy2(mask_path, exported_mask)
+
+    exported_subbands: list[SubbandCombinedProducts] = []
+    for idx, ((lo, hi), (sub_src, exp_src)) in enumerate(zip(subbands, pairs)):
+        counts_dst = export_dir / f"{band_name}_{lo}_{hi}_counts.fits"
+        exp_dst = export_dir / f"{band_name}_{lo}_{hi}_exp.fits"
+        shutil.copy2(sub_src, counts_dst)
+        shutil.copy2(exp_src, exp_dst)
+
+        smooth_src = band_dir / f"{out_prefix}ima_{idx}_subdiv_smooth.fits"
+        smooth_dst: Path | None = None
+        if smooth_src.is_file() and smooth_src.stat().st_size > 0:
+            smooth_dst = export_dir / f"{band_name}_{lo}_{hi}_smooth_flux.fits"
+            shutil.copy2(smooth_src, smooth_dst)
+
+        exported_subbands.append(
+            SubbandCombinedProducts(
+                index=idx,
+                emin=lo,
+                emax=hi,
+                counts_image=counts_dst,
+                exposure_image=exp_dst,
+                smoothed_flux_image=smooth_dst,
+            )
+        )
+
+    return BandCombinedProducts(
+        band_name=band_name,
+        emin=band.emin,
+        emax=band.emax,
+        flux_image=flux_path,
+        mask_image=exported_mask,
+        subbands=exported_subbands,
+    )
+
+
 def run_qpb_image(
     cfg: AnaConfig,
     *,
@@ -333,6 +602,7 @@ def run_qpb_image(
     # 2. Run eimageget (all sub-bands per instrument) + eimagecombine per target band
     band_flux_images: dict[str, Path] = {}
     subband_count_images: dict[str, list[Path]] = {}
+    bands_products: dict[str, BandCombinedProducts] = {}
 
     for band_name, band in qi.bands.items():
         subbands = resolve_subbands(band, qi.default_subband_edges)
@@ -404,6 +674,7 @@ def run_qpb_image(
         flux_name = f"{band_name}_{band.emin}_{band.emax}_flux.fits"
         flux_path = qdir / flux_name
 
+        n_sub = len(subbands)
         comb_params: dict[str, Any] = {
             "prefix": out_prefix,
             "withcheckinput": True,
@@ -411,7 +682,23 @@ def run_qpb_image(
             "withcombineimages": True,
             "withasmooth": qi.with_asmooth,
             "keepinterstage": True,
+            "ecut": qi.ecut,
+            "epn_weight": [qi.epn_weight] * n_sub,
+            "em1_weight": [qi.em1_weight] * n_sub,
+            "em2_weight": [qi.em2_weight] * n_sub,
         }
+        if qi.with_asmooth:
+            comb_params.update(
+                {
+                    "smoothstyle": qi.smoothstyle,
+                    "convolverstyle": qi.convolverstyle,
+                    "width": qi.width,
+                    "minwidth": qi.minwidth,
+                    "maxwidth": qi.maxwidth,
+                    "desiredsnr": qi.desiredsnr,
+                    "nconvolvers": qi.nconvolvers,
+                }
+            )
         comb_params.update(qi.eimagecombine_extra_params)
 
         combine_log = f"{band_name}_combine.log"
@@ -420,29 +707,42 @@ def run_qpb_image(
             if force or dry_run
             else _discover_combined_subband_pairs(band_dir, out_prefix)
         )
-        if not existing_pairs:
-            runner.run(
-                SASCommand(
-                    program="eimagecombine",
-                    cwd=band_dir,
-                    params=comb_params,
-                    core_outputs=[],
-                    intermediate_dir=None,
-                    log_file=combine_log,
-                ),
+        if len(existing_pairs) < len(subbands):
+            if not dry_run and band_dir.exists():
+                for stale in band_dir.glob(f"{out_prefix}*"):
+                    if stale.is_file():
+                        stale.unlink()
+            _run_eimagecombine_isolated(
+                runner,
+                band_dir,
+                out_prefix,
+                comb_params,
+                combine_log,
                 force=force,
+                dry_run=dry_run,
+                docker_container=docker_container,
             )
 
         if not dry_run:
-            pairs, mask_path = _discover_combined_subband_pairs(band_dir, out_prefix)
-            if not pairs:
-                tail = read_log_tail(band_dir / combine_log)
-                raise SASCommandError(
-                    f"eimagecombine finished for {band_name} but no "
-                    f"'{out_prefix}ima_<i>_sub.fits' + 'exp.fits' pairs were "
-                    f"found in {band_dir}.\nLog: {band_dir / combine_log}\n{tail}"
-                )
+            pairs, mask_path = _validate_eimagecombine_outputs(
+                band_dir,
+                band_name,
+                out_prefix,
+                combine_log,
+                len(subbands),
+            )
             _merge_subband_sub_exp_images(pairs, mask_path, flux_path)
+            bands_products[band_name] = _export_band_products(
+                qdir,
+                band_dir,
+                band_name,
+                band,
+                subbands,
+                pairs,
+                mask_path,
+                flux_path,
+                out_prefix,
+            )
 
         band_flux_images[band_name] = flux_path
 
@@ -452,6 +752,7 @@ def run_qpb_image(
         qpb_files=qpb_files,
         band_flux_images=band_flux_images,
         subband_count_images=subband_count_images,
+        bands=bands_products,
     )
     if not dry_run:
         result.save_manifest()
