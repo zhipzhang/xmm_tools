@@ -11,9 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-from astropy.io import fits
-
 from xmm_tools.esas.flare import FlareResult, load_flare_result
 from xmm_tools.exec.command import SASCommand
 from xmm_tools.exec.runner import SASCommandError, SASRunner
@@ -343,49 +340,6 @@ def _discover_combined_subband_pairs(
     return pairs, mask_path
 
 
-def _merge_subband_sub_exp_images(
-    subband_pairs: list[tuple[Path, Path]],
-    mask_path: Path | None,
-    out_path: Path,
-) -> Path:
-    """Compute exposure-corrected rate ``sum_i (C_i / E_i)`` across sub-bands."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    mask_valid: np.ndarray | None = None
-    if mask_path is not None:
-        with fits.open(mask_path) as mhdul:
-            mdata = np.asarray(mhdul[0].data, dtype=np.float64)
-            mask_valid = np.isfinite(mdata) & (mdata > 0)
-
-    total: np.ndarray | None = None
-    header: fits.Header | None = None
-
-    for sub_path, exp_path in subband_pairs:
-        with fits.open(sub_path) as shdul, fits.open(exp_path) as ehdul:
-            counts = np.asarray(shdul[0].data, dtype=np.float64)
-            exp = np.asarray(ehdul[0].data, dtype=np.float64)
-            if header is None:
-                header = shdul[0].header.copy()
-                total = np.zeros_like(counts, dtype=np.float64)
-
-            valid = np.isfinite(counts) & np.isfinite(exp) & (exp > 0)
-            if mask_valid is not None and mask_valid.shape == valid.shape:
-                valid &= mask_valid
-            assert total is not None
-            total[valid] += counts[valid] / exp[valid]
-
-    assert total is not None and header is not None
-    header["BUNIT"] = ("counts/s", "Exposure-corrected QPB-subtracted rate")
-    header.add_history(
-        "Computed sum_i(sub_i / exp_i) from eimagecombine outputs: "
-        + ", ".join(sub_p.name for sub_p, _ in subband_pairs)
-    )
-    fits.PrimaryHDU(data=total.astype(np.float32), header=header).writeto(
-        out_path, overwrite=True
-    )
-    return out_path
-
-
 def _run_eimagecombine_isolated(
     runner: SASRunner,
     band_dir: Path,
@@ -482,6 +436,17 @@ def _validate_eimagecombine_outputs(
             f"eimagecombine finished for {band_name} with incomplete sub-bands: "
             f"expected {expected_subbands}, found {len(pairs)}.\n"
             f"Log: {log_path}\n{tail}"
+        )
+    missing_smooth = [
+        f"{out_prefix}ima_{idx}_subdiv_smooth.fits"
+        for idx in range(expected_subbands)
+        if not (band_dir / f"{out_prefix}ima_{idx}_subdiv_smooth.fits").is_file()
+    ]
+    if missing_smooth:
+        tail = read_log_tail(log_path)
+        raise SASCommandError(
+            f"eimagecombine finished for {band_name} without smoothed flux outputs: "
+            f"{', '.join(missing_smooth)}.\nLog: {log_path}\n{tail}"
         )
     return pairs, mask_path
 
@@ -680,25 +645,20 @@ def run_qpb_image(
             "withcheckinput": True,
             "withaddimages": True,
             "withcombineimages": True,
-            "withasmooth": qi.with_asmooth,
+            "withasmooth": True,
             "keepinterstage": True,
             "ecut": qi.ecut,
             "epn_weight": [qi.epn_weight] * n_sub,
             "em1_weight": [qi.em1_weight] * n_sub,
             "em2_weight": [qi.em2_weight] * n_sub,
+            "smoothstyle": qi.smoothstyle,
+            "convolverstyle": qi.convolverstyle,
+            "width": qi.width,
+            "minwidth": qi.minwidth,
+            "maxwidth": qi.maxwidth,
+            "desiredsnr": qi.desiredsnr,
+            "nconvolvers": qi.nconvolvers,
         }
-        if qi.with_asmooth:
-            comb_params.update(
-                {
-                    "smoothstyle": qi.smoothstyle,
-                    "convolverstyle": qi.convolverstyle,
-                    "width": qi.width,
-                    "minwidth": qi.minwidth,
-                    "maxwidth": qi.maxwidth,
-                    "desiredsnr": qi.desiredsnr,
-                    "nconvolvers": qi.nconvolvers,
-                }
-            )
         comb_params.update(qi.eimagecombine_extra_params)
 
         combine_log = f"{band_name}_combine.log"
@@ -707,7 +667,15 @@ def run_qpb_image(
             if force or dry_run
             else _discover_combined_subband_pairs(band_dir, out_prefix)
         )
-        if len(existing_pairs) < len(subbands):
+        has_all_smooth = (
+            not force
+            and not dry_run
+            and all(
+                (band_dir / f"{out_prefix}ima_{idx}_subdiv_smooth.fits").is_file()
+                for idx in range(n_sub)
+            )
+        )
+        if len(existing_pairs) < n_sub or not has_all_smooth:
             if not dry_run and band_dir.exists():
                 for stale in band_dir.glob(f"{out_prefix}*"):
                     if stale.is_file():
@@ -724,15 +692,16 @@ def run_qpb_image(
             )
 
         if not dry_run:
+            from xmm_tools.sas.qpb_products import BandImages
+
             pairs, mask_path = _validate_eimagecombine_outputs(
                 band_dir,
                 band_name,
                 out_prefix,
                 combine_log,
-                len(subbands),
+                n_sub,
             )
-            _merge_subband_sub_exp_images(pairs, mask_path, flux_path)
-            bands_products[band_name] = _export_band_products(
+            band_prod = _export_band_products(
                 qdir,
                 band_dir,
                 band_name,
@@ -743,6 +712,10 @@ def run_qpb_image(
                 flux_path,
                 out_prefix,
             )
+            BandImages.from_band_products(band_prod).sum_smoothed_flux(
+                apply_mask=True
+            ).writeto(flux_path)
+            bands_products[band_name] = band_prod
 
         band_flux_images[band_name] = flux_path
 

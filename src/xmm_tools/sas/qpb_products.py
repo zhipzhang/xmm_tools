@@ -211,7 +211,7 @@ class BandImages:
         if any(sb.smoothed_flux is None for sb in selected):
             raise ValueError(
                 f"Band {self.band_name!r} does not have smoothed flux maps for all "
-                "selected sub-bands (run qpb-image with with_asmooth = true)"
+                "selected sub-bands"
             )
         ref = selected[0].smoothed_flux
         assert ref is not None

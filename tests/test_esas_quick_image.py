@@ -84,8 +84,10 @@ class TestESASQuickImage(unittest.TestCase):
                         (cmd.cwd_path / f"{tag}_ima_{idx}fwc.fits").write_text("fwc", encoding="utf-8")
                 elif cmd.program == "eimagecombine":
                     prefix = cmd.params["prefix"]
-                    # Subband 0: counts=3.0 / exp=2.0 -> 1.5; Subband 1: counts=5.0 / exp=2.0 -> 2.5
-                    for idx, (cnt_val, exp_val) in enumerate(((3.0, 2.0), (5.0, 2.0))):
+                    # Subband 0: counts=3.0 / exp=2.0 -> smooth=1.5; Subband 1: counts=5.0 / exp=2.0 -> smooth=2.5
+                    for idx, (cnt_val, exp_val, sm_val) in enumerate(
+                        ((3.0, 2.0, 1.5), (5.0, 2.0, 2.5))
+                    ):
                         fits.PrimaryHDU(
                             data=np.full((4, 4), cnt_val, dtype=np.float32)
                         ).writeto(
@@ -96,6 +98,12 @@ class TestESASQuickImage(unittest.TestCase):
                             data=np.full((4, 4), exp_val, dtype=np.float32)
                         ).writeto(
                             cmd.cwd_path / f"{prefix}ima_{idx}exp.fits",
+                            overwrite=True,
+                        )
+                        sm_arr = np.full((4, 4), sm_val, dtype=np.float32)
+                        sm_arr[0, 0] = np.nan
+                        fits.PrimaryHDU(data=sm_arr).writeto(
+                            cmd.cwd_path / f"{prefix}ima_{idx}_subdiv_smooth.fits",
                             overwrite=True,
                         )
                     mask = np.ones((4, 4), dtype=np.float32)
@@ -134,13 +142,13 @@ class TestESASQuickImage(unittest.TestCase):
             self.assertNotIn("ootfile", eimg_calls[0])
             self.assertEqual(Path(eimg_calls[2]["ootfile"]).name, "pn_oot_evt.fits")
 
-            # Verify summed subband flux image has expected values (1.5 + 2.5 = 4.0, masked [0,0] = 0.0)
+            # Verify summed smoothed flux image has expected values (1.5 + 2.5 = 4.0, masked [0,0] = NaN)
             self.assertEqual(res.band_flux_images["soft"].name, "soft_500_2000_flux.fits")
             self.assertEqual(res.band_flux_images["hard"].name, "hard_2000_7000_flux.fits")
             with fits.open(res.band_flux_images["soft"]) as hdul:
                 expected = np.full((4, 4), 4.0, dtype=np.float32)
-                expected[0, 0] = 0.0
-                np.testing.assert_allclose(hdul[0].data, expected)
+                expected[0, 0] = np.nan
+                np.testing.assert_allclose(hdul[0].data, expected, equal_nan=True)
                 self.assertEqual(hdul[0].header.get("BUNIT"), "counts/s")
 
             manifest = json.loads(res.manifest_path.read_text(encoding="utf-8"))
@@ -216,6 +224,9 @@ class TestESASQuickImage(unittest.TestCase):
                         )
                         fits.PrimaryHDU(data=np.ones((2, 2), dtype=np.float32)).writeto(
                             cmd.cwd_path / f"{prefix}ima_{idx}exp.fits", overwrite=True
+                        )
+                        fits.PrimaryHDU(data=np.ones((2, 2), dtype=np.float32)).writeto(
+                            cmd.cwd_path / f"{prefix}ima_{idx}_subdiv_smooth.fits", overwrite=True
                         )
                 else:
                     for out in cmd.core_outputs:

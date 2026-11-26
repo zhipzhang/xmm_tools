@@ -172,7 +172,6 @@ class QPBImageConfig:
 
     dir: str = "qpb_image"
     bin_size: int = 50
-    with_asmooth: bool = False
     ecut: float = 1000.0
     epn_weight: float = 1.0
     em1_weight: float = 0.4
@@ -358,7 +357,6 @@ class AnaConfig:
         qpb_image = QPBImageConfig(
             dir=paths.qpb_image_dir,
             bin_size=int(qi_sec.get("bin_size", 50)),
-            with_asmooth=bool(qi_sec.get("with_asmooth", False)),
             ecut=float(qi_sec.get("ecut", 1000.0)),
             epn_weight=float(qi_sec.get("epn_weight", 1.0)),
             em1_weight=float(qi_sec.get("em1_weight", 0.4)),
@@ -445,12 +443,11 @@ pn_oot = "{pn_oot}"           # Standardized PN Out-of-Time event file
 
 [sas.qpb_image]
 bin_size = 50                        # Spatial pixel bin size (50 physical units = 2.5 arcsec/pix)
-with_asmooth = false                 # Run eimagecombine asmooth (false = keep unsmoothed sub/exp maps)
 ecut = 1000.0                        # Minimum combined exposure threshold (s) for eimagecombine mask
 epn_weight = 1.0                     # EPIC-pn exposure weight in eimagecombine
 em1_weight = 0.4                     # EPIC-MOS1 exposure weight in eimagecombine
 em2_weight = 0.4                     # EPIC-MOS2 exposure weight in eimagecombine
-smoothstyle = "simple"               # asmooth style when with_asmooth = true ("simple" | "adaptive")
+smoothstyle = "simple"               # asmooth style ("simple" | "adaptive")
 convolverstyle = "gaussian"          # asmooth kernel ("gaussian" | "tophat" | "squarebox")
 width = 5.0                          # Simple smoothing kernel width (pixels)
 minwidth = 0.0                       # Adaptive smoothing min kernel width (pixels)
