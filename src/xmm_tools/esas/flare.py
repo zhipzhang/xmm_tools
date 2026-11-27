@@ -1,27 +1,39 @@
-"""Soft-proton flare filtering stage (``espfilt`` + ESAS FLAG ``evselect``)."""
+"""Soft-proton flare filtering stage (``espfilt`` + non-destructive FLAG ``evselect``)."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-import json
 from pathlib import Path
-import shutil
+from typing import Any
 
-from xmm_tools.exec.command import SASCommand
-from xmm_tools.exec.runner import SASCommandError, SASRunner
-from xmm_tools.pipeline.config import AnaConfig
-from xmm_tools.pipeline.stage import (
-    StageManifest,
-    all_nonempty,
-    read_manifest_json,
-    relativize_manifest_paths,
-    resolve_manifest_paths,
+from xmm_tools.config import AnaConfig
+from xmm_tools.esas.naming import (
+    ALLEVC_SUFFIX,
+    discover_esas_prefix,
+    env_calibration_inputs,
+    load_stage_manifest_payload,
+    relativize_path_map,
+    resolve_path_map,
+    save_stage_manifest,
+    strip_esas_suffix,
 )
+from xmm_tools.exec import (
+    SASCommand,
+    SASCommandError,
+    SASRunner,
+    StageManifest,
+    StageWorkspace,
+    StepLedger,
+    is_nonempty_file,
+    normalize_lexical_path,
+)
+
+_PUBLISHED_PATTERNS = ("*-allevc.fits", "*-allevcoot.fits", "*-hist.qdp", "*-gti.fits")
 
 
 @dataclass
-class FlareResult(StageManifest):
+class FlareResult:
     """Core artifacts produced by the ``flare`` stage."""
 
     flare_dir: Path
@@ -30,208 +42,170 @@ class FlareResult(StageManifest):
     clean_events: dict[str, Path] = field(default_factory=dict)
     qdp_files: dict[str, Path] = field(default_factory=dict)
     gti_files: dict[str, Path] = field(default_factory=dict)
+    workspace_root: Path | None = None
+    manifest: StageManifest | None = None
 
-    def to_manifest_dict(self) -> dict[str, object]:
-        return {
-            "stage": "flare",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+    def save_manifest(self) -> Path:
+        """Persist a v2 ``manifest.json`` preserving ``workspace_root`` portability."""
+        ws_root = self.workspace_root
+        products_payload: dict[str, Any] = {
             "flag_filtered": self.flag_filtered,
-            "clean_events": relativize_manifest_paths(self.clean_events),
-            "qdp_files": relativize_manifest_paths(self.qdp_files),
-            "gti_files": relativize_manifest_paths(self.gti_files),
+            "clean_events": relativize_path_map(
+                self.clean_events, self.flare_dir, workspace_root=ws_root
+            ),
+            "qdp_files": relativize_path_map(
+                self.qdp_files, self.flare_dir, workspace_root=ws_root
+            ),
+            "gti_files": relativize_path_map(
+                self.gti_files, self.flare_dir, workspace_root=ws_root
+            ),
         }
+        self.manifest, written = save_stage_manifest(
+            self.manifest_path,
+            self.flare_dir,
+            stage="flare",
+            products=products_payload,
+            existing_manifest=self.manifest,
+            workspace_root=ws_root,
+        )
+        return written
 
     @classmethod
-    def from_manifest(cls, manifest_path: Path) -> FlareResult:
-        raw = read_manifest_json(manifest_path)
-        flare_dir = manifest_path.parent
+    def from_manifest(
+        cls,
+        manifest_path: Path | str,
+        *,
+        workspace_root: Path | str | None = None,
+        require_completed: bool = False,
+    ) -> FlareResult:
+        """Load a ``FlareResult`` from a v2 or legacy v1 ``manifest.json``."""
+        mpath = normalize_lexical_path(manifest_path)
+        fdir = mpath.parent
+        ws_root = (
+            normalize_lexical_path(workspace_root)
+            if workspace_root is not None
+            else mpath.parent.parent
+        )
+        stage_manifest, payload = load_stage_manifest_payload(
+            mpath, stage_label="Flare", require_completed=require_completed
+        )
         return cls(
-            flare_dir=flare_dir,
-            manifest_path=manifest_path,
-            flag_filtered=bool(raw.get("flag_filtered", False)),
-            clean_events=resolve_manifest_paths(flare_dir, raw, "clean_events"),
-            qdp_files=resolve_manifest_paths(flare_dir, raw, "qdp_files"),
-            gti_files=resolve_manifest_paths(flare_dir, raw, "gti_files"),
+            flare_dir=fdir,
+            manifest_path=mpath,
+            flag_filtered=bool(payload.get("flag_filtered", False)),
+            clean_events=resolve_path_map(fdir, payload.get("clean_events")),
+            qdp_files=resolve_path_map(fdir, payload.get("qdp_files")),
+            gti_files=resolve_path_map(fdir, payload.get("gti_files")),
+            workspace_root=ws_root,
+            manifest=stage_manifest,
         )
 
 
-def _prefix_from_evt(evt_filename: str) -> str:
-    name = Path(evt_filename).name
-    for suffix in (".fits", ".fit", ".FITS", ".FIT"):
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return name
+def _resolve_raw_inputs(
+    cfg: AnaConfig, *, dry_run: bool
+) -> tuple[list[tuple[str, Path]], Path | None]:
+    active: list[tuple[str, Path]] = []
+    for inst, evt_name in (
+        ("mos1", cfg.instruments.mos1),
+        ("mos2", cfg.instruments.mos2),
+        ("pn", cfg.instruments.pn),
+    ):
+        if not evt_name:
+            continue
+        evt_path = normalize_lexical_path(cfg.paths.resolve(evt_name))
+        if not dry_run and not is_nonempty_file(evt_path):
+            raise FileNotFoundError(
+                f"Raw event file for {inst!r} not found or empty: {evt_path}"
+            )
+        active.append((inst, evt_path))
+    if not active:
+        raise ValueError("No active instruments configured in [instruments]")
+
+    pn_oot: Path | None = None
+    if cfg.instruments.pn and cfg.instruments.pn_oot:
+        oot_path = normalize_lexical_path(cfg.paths.resolve(cfg.instruments.pn_oot))
+        if not dry_run and not is_nonempty_file(oot_path):
+            raise FileNotFoundError(
+                f"Raw PN OOT event file not found or empty: {oot_path}"
+            )
+        pn_oot = oot_path
+    return active, pn_oot
 
 
-def _discover_espfilt_prefix(
-    flare_dir: Path,
-    inst: str,
-    *,
-    pre_existing: set[str] | None = None,
-) -> str | None:
-    """Discover the real ESAS exposure prefix (e.g. ``mos1S001``) from ``*-allevc.fits``."""
-    if not flare_dir.exists():
-        return None
-
-    suffix = "-allevc.fits"
-    all_allevc = [p for p in flare_dir.glob(f"*{suffix}") if p.is_file()]
-    if not all_allevc:
-        return None
-
-    def _pick(candidates: list[Path]) -> str | None:
-        if not candidates:
-            return None
-        chosen = max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
-        return chosen.name[: -len(suffix)]
-
-    if pre_existing is not None:
-        new_inst = [
-            p for p in all_allevc if p.name not in pre_existing and p.name.startswith(inst)
-        ]
-        if new_inst:
-            return _pick(new_inst)
-        new_any = [p for p in all_allevc if p.name not in pre_existing]
-        if new_any:
-            return _pick(new_any)
-
-    inst_matches = [p for p in all_allevc if p.name.startswith(inst)]
-    return _pick(inst_matches)
-
-
-def _required_espfilt_outputs(prefix: str, *, with_oot: bool = False) -> list[str]:
-    outputs = [f"{prefix}-allevc.fits", f"{prefix}-hist.qdp", f"{prefix}-gti.fits"]
+def _collect_espfilt_outputs(
+    esp_dir: Path, *, instrument: str, with_oot: bool
+) -> dict[str, Path]:
+    prefix = discover_esas_prefix(esp_dir, instrument, ALLEVC_SUFFIX)
+    outputs = {
+        "allevc": esp_dir / f"{prefix}-allevc.fits",
+        "hist_qdp": esp_dir / f"{prefix}-hist.qdp",
+        "gti": esp_dir / f"{prefix}-gti.fits",
+    }
     if with_oot:
-        outputs.append(f"{prefix}-allevcoot.fits")
+        outputs["allevcoot"] = esp_dir / f"{prefix}-allevcoot.fits"
     return outputs
 
 
-def _outputs_ready(flare_dir: Path, filenames: list[str]) -> bool:
-    return all(
-        (flare_dir / name).exists() and (flare_dir / name).stat().st_size > 0
-        for name in filenames
-    )
-
-
-def _isolate_flare_intermediate(
-    flare_dir: Path,
-    pre_existing: set[str],
-    keep: set[str],
-    intermediate_dir: str = "_intermediate",
-) -> None:
-    keep_all = set(keep) | {intermediate_dir}
-    dest_dir = flare_dir / intermediate_dir
-    for entry in sorted(flare_dir.iterdir()):
-        if entry.name in pre_existing or entry.name in keep_all or entry.is_dir():
-            continue
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        target = dest_dir / entry.name
-        if target.exists():
-            target.unlink()
-        shutil.move(str(entry), str(target))
-
-
-def _run_single_espfilt(
-    runner: SASRunner,
-    *,
-    flare_dir: Path,
+def _resolve_prefix(
+    esp_rec_outputs: Mapping[str, Any],
+    esp_dir: Path,
     inst: str,
-    evt_name: str,
-    params: dict[str, object],
-    symlinks: dict[str, Path | str],
-    log_file: str,
-    with_oot: bool = False,
-    dry_run: bool = False,
-    force: bool = False,
+    evt_path: Path,
+    *,
+    dry_run: bool,
 ) -> str:
-    """Run ``espfilt`` for one instrument and discover its real ESAS output prefix."""
-    if not force and not dry_run:
-        existing_prefix = _discover_espfilt_prefix(flare_dir, inst)
-        if existing_prefix is not None and _outputs_ready(
-            flare_dir, _required_espfilt_outputs(existing_prefix, with_oot=with_oot)
-        ):
-            return existing_prefix
-
-    pre_existing = (
-        {p.name for p in flare_dir.iterdir()} if flare_dir.exists() else set()
-    )
-    cmd = SASCommand(
-        program="espfilt",
-        cwd=flare_dir,
-        params=params,
-        symlinks=symlinks,
-        core_outputs=[],
-        intermediate_dir=None,
-        log_file=log_file,
-    )
-    runner.run(cmd, force=force)
-
+    if "allevc" in esp_rec_outputs:
+        return strip_esas_suffix(esp_rec_outputs["allevc"].path)
     if dry_run:
-        return _discover_espfilt_prefix(flare_dir, inst) or _prefix_from_evt(evt_name)
+        try:
+            return discover_esas_prefix(esp_dir, inst, ALLEVC_SUFFIX)
+        except SASCommandError:
+            return strip_esas_suffix(evt_path)
+    return discover_esas_prefix(esp_dir, inst, ALLEVC_SUFFIX)
 
-    prefix = _discover_espfilt_prefix(flare_dir, inst, pre_existing=pre_existing)
-    if prefix is None:
-        raise SASCommandError(
-            f"espfilt finished for {inst} but no '{inst}*-allevc.fits' output "
-            f"was found in {flare_dir}"
-        )
 
-    required = _required_espfilt_outputs(prefix, with_oot=with_oot)
-    missing_or_empty = [
-        rel
-        for rel in required
-        if not (flare_dir / rel).exists() or (flare_dir / rel).stat().st_size == 0
-    ]
-    if missing_or_empty:
-        raise SASCommandError(
-            "espfilt finished but required outputs are missing or empty: "
-            f"{', '.join(missing_or_empty)}"
-        )
-
-    keep = set(required) | set(symlinks.keys()) | {log_file}
-    _isolate_flare_intermediate(flare_dir, pre_existing, keep)
-    return prefix
+def _prune_stale_published(flare_dir: Path, keep_names: set[str]) -> None:
+    if not flare_dir.is_dir():
+        return
+    for pattern in _PUBLISHED_PATTERNS:
+        for entry in flare_dir.glob(pattern):
+            if entry.name not in keep_names and (
+                entry.is_symlink() or entry.is_file()
+            ):
+                entry.unlink()
 
 
 def load_flare_result(cfg: AnaConfig) -> FlareResult:
-    """Load flare stage outputs from ``manifest.json`` (or scan directory)."""
-    flare_dir = cfg.paths.resolve(cfg.paths.flare_dir)
+    """Load flare stage outputs from ``manifest.json`` (or deterministic scan)."""
+    flare_dir = normalize_lexical_path(cfg.paths.resolve(cfg.paths.flare_dir))
+    ws_root = normalize_lexical_path(cfg.paths.workdir)
     manifest_path = flare_dir / "manifest.json"
-    if manifest_path.exists():
-        return FlareResult.from_manifest(manifest_path)
+    if manifest_path.is_file():
+        return FlareResult.from_manifest(
+            manifest_path, workspace_root=ws_root, require_completed=True
+        )
 
-    # Fallback for directories created manually without manifest.json
     clean_events: dict[str, Path] = {}
     qdp_files: dict[str, Path] = {}
     gti_files: dict[str, Path] = {}
 
-    for inst, evt_name in cfg.instruments.active_mos():
-        prefix = _discover_espfilt_prefix(flare_dir, inst) or _prefix_from_evt(evt_name)
-        allevc = flare_dir / f"{prefix}-allevc.fits"
-        if allevc.exists():
-            clean_events[inst] = allevc
+    for inst in cfg.instruments.active_keys():
+        if not flare_dir.is_dir() or not any(
+            is_nonempty_file(p) for p in flare_dir.glob(f"{inst}*{ALLEVC_SUFFIX}")
+        ):
+            continue
+        prefix = discover_esas_prefix(flare_dir, inst, ALLEVC_SUFFIX)
+        clean_events[inst] = flare_dir / f"{prefix}-allevc.fits"
+        if inst == "pn":
+            allevcoot = flare_dir / f"{prefix}-allevcoot.fits"
+            if is_nonempty_file(allevcoot):
+                clean_events["pn_oot"] = allevcoot
         hist = flare_dir / f"{prefix}-hist.qdp"
-        if hist.exists():
+        if is_nonempty_file(hist):
             qdp_files[inst] = hist
         gti = flare_dir / f"{prefix}-gti.fits"
-        if gti.exists():
+        if is_nonempty_file(gti):
             gti_files[inst] = gti
-
-    if cfg.instruments.pn:
-        prefix = _discover_espfilt_prefix(flare_dir, "pn") or _prefix_from_evt(
-            cfg.instruments.pn
-        )
-        allevc = flare_dir / f"{prefix}-allevc.fits"
-        if allevc.exists():
-            clean_events["pn"] = allevc
-        allevcoot = flare_dir / f"{prefix}-allevcoot.fits"
-        if allevcoot.exists():
-            clean_events["pn_oot"] = allevcoot
-        hist = flare_dir / f"{prefix}-hist.qdp"
-        if hist.exists():
-            qdp_files["pn"] = hist
-        gti = flare_dir / f"{prefix}-gti.fits"
-        if gti.exists():
-            gti_files["pn"] = gti
 
     return FlareResult(
         flare_dir=flare_dir,
@@ -240,6 +214,7 @@ def load_flare_result(cfg: AnaConfig) -> FlareResult:
         clean_events=clean_events,
         qdp_files=qdp_files,
         gti_files=gti_files,
+        workspace_root=ws_root,
     )
 
 
@@ -250,151 +225,197 @@ def run_flare(
     force: bool = False,
     docker_container: str | None = None,
 ) -> FlareResult:
-    """Run ``espfilt`` (and optional ESAS FLAG ``evselect``) for active instruments."""
-    flare_dir = cfg.paths.resolve(cfg.paths.flare_dir)
-    manifest_path = flare_dir / "manifest.json"
-    esp = cfg.espfilt
+    """Run ``espfilt`` (and non-destructive ESAS FLAG ``evselect``) per instrument."""
+    flare_dir = normalize_lexical_path(cfg.paths.resolve(cfg.paths.flare_dir))
+    ws = StageWorkspace(
+        workspace_root=normalize_lexical_path(cfg.paths.workdir),
+        stage_dir=flare_dir,
+    )
+    ws.ensure_dirs(dry_run=dry_run)
 
-    # Check if already completed (including FLAG requirement and active instruments)
-    if not force and manifest_path.exists():
-        existing = FlareResult.from_manifest(manifest_path)
-        flag_ok = (not esp.apply_flag_filter) or existing.flag_filtered
-        insts_ok = all(k in existing.clean_events for k in cfg.instruments.active_keys())
-        if flag_ok and insts_ok and all_nonempty(existing.clean_events):
-            return existing
-
+    active_events, pn_oot_path = _resolve_raw_inputs(cfg, dry_run=dry_run)
+    esp = cfg.flare
+    cal_inputs = env_calibration_inputs(cfg, dry_run=dry_run)
+    ledger = StepLedger(
+        ws.manifest_path,
+        stage="flare",
+        workspace_root=ws.workspace_root,
+        config={
+            "apply_flag_filter": esp.apply_flag_filter,
+            "elow": esp.elow,
+            "ehigh": esp.ehigh,
+            "method": esp.method,
+            "instruments": [inst for inst, _ in active_events],
+        },
+        dry_run=dry_run,
+        force=force,
+    )
     runner = SASRunner(
         env=cfg.env,
         dry_run=dry_run,
-        skip_if_exists=not force,
+        skip_if_exists=False,
         docker_container=docker_container,
     )
 
     clean_events: dict[str, Path] = {}
     qdp_files: dict[str, Path] = {}
     gti_files: dict[str, Path] = {}
-    flag_targets: list[tuple[str, str, str]] = []  # (key, filename, expr)
+    publish_sources: list[tuple[str, str, Path, dict[str, Path]]] = []
 
-    # 1. Run espfilt for MOS1 / MOS2
-    for inst, evt_name in cfg.instruments.active_mos():
-        prefix = _run_single_espfilt(
-            runner,
-            flare_dir=flare_dir,
-            inst=inst,
-            evt_name=evt_name,
-            params={
-                "eventfile": Path(evt_name).name,
-                "elow": esp.elow,
-                "ehigh": esp.ehigh,
-                "withsmoothing": esp.withsmoothing,
-                "smooth": esp.smooth,
-                "rangescale": esp.rangescale_mos,
-                "allowsigma": esp.allowsigma,
-                "method": esp.method,
-                "keepinterfiles": esp.keepinterfiles,
-            },
-            symlinks={Path(evt_name).name: cfg.paths.resolve(evt_name)},
-            log_file=f"{inst}_espfilt.log",
-            with_oot=False,
-            dry_run=dry_run,
-            force=force,
-        )
-        allevc_name = f"{prefix}-allevc.fits"
-        hist_name = f"{prefix}-hist.qdp"
-        gti_name = f"{prefix}-gti.fits"
-        clean_events[inst] = flare_dir / allevc_name
-        qdp_files[inst] = flare_dir / hist_name
-        gti_files[inst] = flare_dir / gti_name
-        flag_targets.append((inst, allevc_name, esp.mos_flag_expr))
-
-    # 2. Run espfilt for PN (+ OOT)
-    if cfg.instruments.pn:
-        pn_evt = cfg.instruments.pn
-        symlinks: dict[str, Path | str] = {
-            Path(pn_evt).name: cfg.paths.resolve(pn_evt)
-        }
-        pn_params: dict[str, object] = {
-            "eventfile": Path(pn_evt).name,
+    for inst, evt_path in active_events:
+        esp_dir = ws.step_dir("espfilt", inst)
+        symlinks: dict[str, Path | str] = {evt_path.name: evt_path}
+        params: dict[str, Any] = {
+            "eventfile": evt_path.name,
             "elow": esp.elow,
             "ehigh": esp.ehigh,
             "withsmoothing": esp.withsmoothing,
             "smooth": esp.smooth,
-            "rangescale": esp.rangescale_pn,
+            "rangescale": esp.rangescale_pn if inst == "pn" else esp.rangescale_mos,
             "allowsigma": esp.allowsigma,
             "method": esp.method,
             "keepinterfiles": esp.keepinterfiles,
         }
+        esp_inputs = dict(cal_inputs)
+        if not dry_run or is_nonempty_file(evt_path):
+            esp_inputs["raw_event"] = evt_path
 
-        has_oot = bool(cfg.instruments.pn_oot)
-        if cfg.instruments.pn_oot:
-            oot_evt = cfg.instruments.pn_oot
-            symlinks[Path(oot_evt).name] = cfg.paths.resolve(oot_evt)
-            pn_params["withoot"] = "Y"
-            pn_params["ootfile"] = Path(oot_evt).name
+        has_oot = inst == "pn" and pn_oot_path is not None
+        if has_oot and pn_oot_path is not None:
+            symlinks[pn_oot_path.name] = pn_oot_path
+            params["withoot"] = "Y"
+            params["ootfile"] = pn_oot_path.name
+            if not dry_run or is_nonempty_file(pn_oot_path):
+                esp_inputs["pn_oot"] = pn_oot_path
 
-        prefix = _run_single_espfilt(
-            runner,
-            flare_dir=flare_dir,
-            inst="pn",
-            evt_name=pn_evt,
-            params=pn_params,
+        esp_cmd = SASCommand(
+            program="espfilt",
+            cwd=esp_dir,
+            params=params,
             symlinks=symlinks,
-            log_file="pn_espfilt.log",
-            with_oot=has_oot,
-            dry_run=dry_run,
-            force=force,
+            expected_outputs=[],
+            log_file=f"{inst}_espfilt.log",
         )
+        step_id = f"espfilt:{inst}"
+        if (
+            not dry_run
+            and ledger.can_reuse(step_id, esp_cmd, inputs=esp_inputs) is None
+            and esp_dir.is_dir()
+        ):
+            for pat in ("*-allevc*.fits", "*-hist.qdp", "*-gti.fits"):
+                for stale in esp_dir.glob(pat):
+                    if stale.is_file() or stale.is_symlink():
+                        stale.unlink()
+
+        esp_rec = ledger.run_step(
+            step_id,
+            runner,
+            esp_cmd,
+            inputs=esp_inputs,
+            collect_outputs=lambda d, i=inst, o=has_oot: _collect_espfilt_outputs(
+                d, instrument=i, with_oot=o
+            ),
+        )
+        prefix = _resolve_prefix(
+            esp_rec.outputs, esp_dir, inst, evt_path, dry_run=dry_run
+        )
+
+        raw_allevc = esp_dir / f"{prefix}-allevc.fits"
+        expr = esp.pn_flag_expr if inst == "pn" else esp.mos_flag_expr
+        flag_sources: dict[str, Path] = {inst: raw_allevc}
+        if has_oot:
+            flag_sources["pn_oot"] = esp_dir / f"{prefix}-allevcoot.fits"
+
+        selected_sources: dict[str, Path] = dict(flag_sources)
+        if esp.apply_flag_filter:
+            selected_sources = {}
+            for key, raw_src in flag_sources.items():
+                flag_dir = ws.step_dir("flag_filter", key)
+                flag_inputs = dict(cal_inputs)
+                if not dry_run or is_nonempty_file(raw_src):
+                    flag_inputs["unflagged"] = raw_src
+                flag_cmd = SASCommand(
+                    program="evselect",
+                    cwd=flag_dir,
+                    params={
+                        "table": "unflagged_events.fits",
+                        "expression": expr,
+                        "filtertype": "expression",
+                        "keepfilteroutput": True,
+                        "filteredset": "clean_events.fits",
+                    },
+                    symlinks={"unflagged_events.fits": raw_src},
+                    expected_outputs=["clean_events.fits"],
+                    log_file=f"{key}_flag.log",
+                )
+                ledger.run_step(
+                    f"flag_filter:{key}", runner, flag_cmd, inputs=flag_inputs
+                )
+                selected_sources[key] = flag_dir / "clean_events.fits"
+
+        publish_sources.append((inst, prefix, esp_dir, selected_sources))
+
+    keep_names: set[str] = set()
+    for inst, prefix, esp_dir, selected_sources in publish_sources:
         allevc_name = f"{prefix}-allevc.fits"
-        allevcoot_name = f"{prefix}-allevcoot.fits"
         hist_name = f"{prefix}-hist.qdp"
         gti_name = f"{prefix}-gti.fits"
-        clean_events["pn"] = flare_dir / allevc_name
-        qdp_files["pn"] = flare_dir / hist_name
-        gti_files["pn"] = flare_dir / gti_name
-        flag_targets.append(("pn", allevc_name, esp.pn_flag_expr))
-        if has_oot:
-            clean_events["pn_oot"] = flare_dir / allevcoot_name
-            flag_targets.append(("pn_oot", allevcoot_name, esp.pn_flag_expr))
-
-    # 3. Apply ESAS FLAG filtering via evselect and atomically replace allevc files
-    flag_filtered = False
-    if esp.apply_flag_filter:
-        flag_runner = SASRunner(
-            env=cfg.env,
-            dry_run=dry_run,
-            skip_if_exists=False,
-            docker_container=docker_container,
-        )
-        for key, filename, expr in flag_targets:
-            stem = _prefix_from_evt(filename)
-            new_name = f"{stem}-new.fits"
-            ev_cmd = SASCommand(
-                program="evselect",
-                cwd=flare_dir,
-                params={
-                    "table": filename,
-                    "expression": expr,
-                    "filtertype": "expression",
-                    "keepfilteroutput": True,
-                    "filteredset": new_name,
-                },
-                core_outputs=[new_name],
-                intermediate_dir=None,
-                log_file=f"{key}_flag.log",
+        keep_names.update({allevc_name, hist_name, gti_name})
+        if dry_run:
+            clean_events[inst] = flare_dir / allevc_name
+            qdp_files[inst] = flare_dir / hist_name
+            gti_files[inst] = flare_dir / gti_name
+            if "pn_oot" in selected_sources:
+                oot_name = f"{prefix}-allevcoot.fits"
+                keep_names.add(oot_name)
+                clean_events["pn_oot"] = flare_dir / oot_name
+        else:
+            clean_events[inst] = ws.publish(
+                selected_sources[inst], allevc_name, mode="symlink"
             )
-            flag_runner.run(ev_cmd, force=True)
-            if not dry_run:
-                shutil.move(str(flare_dir / new_name), str(flare_dir / filename))
-        flag_filtered = not dry_run
+            qdp_files[inst] = ws.publish(
+                esp_dir / hist_name, hist_name, mode="symlink"
+            )
+            gti_files[inst] = ws.publish(
+                esp_dir / gti_name, gti_name, mode="symlink"
+            )
+            if "pn_oot" in selected_sources:
+                oot_name = f"{prefix}-allevcoot.fits"
+                keep_names.add(oot_name)
+                clean_events["pn_oot"] = ws.publish(
+                    selected_sources["pn_oot"], oot_name, mode="symlink"
+                )
 
-    result = FlareResult(
+    if not dry_run:
+        _prune_stale_published(flare_dir, keep_names)
+
+    if ledger.previous is not None:
+        active_suffixes = {inst for inst, _ in active_events}
+        if pn_oot_path is not None:
+            active_suffixes.add("pn_oot")
+        ledger.previous.steps = {
+            sid: rec
+            for sid, rec in ledger.previous.steps.items()
+            if sid.split(":", 1)[-1] in active_suffixes
+        }
+
+    flag_filtered = bool(esp.apply_flag_filter and not dry_run)
+    manifest = ledger.commit(
+        products={
+            "flag_filtered": flag_filtered,
+            "clean_events": clean_events,
+            "qdp_files": qdp_files,
+            "gti_files": gti_files,
+        },
+        prune_unseen_steps=False,
+    )
+    return FlareResult(
         flare_dir=flare_dir,
-        manifest_path=manifest_path,
+        manifest_path=ws.manifest_path,
         flag_filtered=flag_filtered,
         clean_events=clean_events,
         qdp_files=qdp_files,
         gti_files=gti_files,
+        workspace_root=ws.workspace_root,
+        manifest=manifest,
     )
-    if not dry_run:
-        result.save_manifest()
-    return result

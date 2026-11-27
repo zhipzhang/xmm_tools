@@ -22,6 +22,11 @@ def _to_posix(rel: str | Path) -> str:
     return PurePosixPath(str(rel).replace(os.sep, "/")).as_posix()
 
 
+def _real_parent_path(path: Path) -> Path:
+    """Resolve ancestor directory symlinks without dereferencing the leaf entry."""
+    return Path(os.path.realpath(path.parent)) / path.name
+
+
 def workspace_relative_path(
     path: Path | str,
     base_dir: Path | str,
@@ -39,14 +44,34 @@ def workspace_relative_path(
     """
     norm_path = normalize_lexical_path(path)
     norm_base = normalize_lexical_path(base_dir)
+    norm_root = (
+        normalize_lexical_path(workspace_root)
+        if workspace_root is not None
+        else None
+    )
 
     if norm_path.is_relative_to(norm_base):
         return _to_posix(os.path.relpath(norm_path, norm_base))
 
-    if workspace_root is not None:
-        norm_root = normalize_lexical_path(workspace_root)
-        if norm_path.is_relative_to(norm_root) and norm_base.is_relative_to(norm_root):
-            return _to_posix(os.path.relpath(norm_path, norm_base))
+    if (
+        norm_root is not None
+        and norm_path.is_relative_to(norm_root)
+        and norm_base.is_relative_to(norm_root)
+    ):
+        return _to_posix(os.path.relpath(norm_path, norm_base))
+
+    # Secondary check for OS-level ancestor directory symlinks (e.g. macOS
+    # /var -> /private/var), resolving parent directories only so leaf artifact
+    # symlinks are never dereferenced.
+    real_path = _real_parent_path(norm_path)
+    real_base = Path(os.path.realpath(norm_base))
+    if real_path.is_relative_to(real_base):
+        return _to_posix(os.path.relpath(real_path, real_base))
+
+    if norm_root is not None:
+        real_root = Path(os.path.realpath(norm_root))
+        if real_path.is_relative_to(real_root) and real_base.is_relative_to(real_root):
+            return _to_posix(os.path.relpath(real_path, real_base))
 
     return norm_path.as_posix()
 

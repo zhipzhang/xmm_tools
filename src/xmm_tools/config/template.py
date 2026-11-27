@@ -112,7 +112,7 @@ extra_params = {{}}                    # Extra key=value parameters passed throu
 [esas.spectrum]
 max_workers = 2                      # Concurrent workers for multi-region extraction
 elow = 400                           # Default spectrum lower energy bound (eV)
-ehigh = 12500                        # Default spectrum upper energy bound (eV)
+ehigh = 7200                         # Default spectrum upper energy bound (eV)
 pattern_mos = 12                     # Event pattern threshold for MOS1/MOS2
 pattern_pn = 4                       # Event pattern threshold for EPIC-pn
 withsrcrem = true                    # Apply cheese point-source masks

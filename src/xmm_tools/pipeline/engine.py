@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from xmm_tools.esas.cheese import CheeseResult, run_cheese
 from xmm_tools.esas.flare import FlareResult, run_flare
-from xmm_tools.esas.spectrum import SpectrumRegionSpec, SpectrumResult, run_spectrum
-from xmm_tools.pipeline.config import AnaConfig
+from xmm_tools.esas.spectrum import SpectrumResult, run_spectrum
+from xmm_tools.pipeline.config import AnaConfig, SpectrumRegionSpec
 from xmm_tools.pipeline.context import PipelineContext
 from xmm_tools.pipeline.stage import StageSpec
 from xmm_tools.sas.qpb_image import QPBImageResult, run_qpb_image

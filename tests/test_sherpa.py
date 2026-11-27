@@ -1,12 +1,12 @@
 """Tests for xmm_tools.sherpa OOP wrappers (runs against real Sherpa when available)."""
 
-from pathlib import Path
 import json
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
-
 from astropy.io import fits
 
 try:
@@ -115,6 +115,7 @@ def _make_synthetic_spectrum_files(
 class TestSherpaOOP(unittest.TestCase):
     def test_builtin_diagonal_rmfs_load(self):
         from sherpa.astro.io import read_rmf
+
         from xmm_tools.sherpa.dataset import default_diagonal_rmf_path
 
         for inst in ("mos1", "mos2", "pn"):
@@ -290,7 +291,7 @@ class TestSherpaOOP(unittest.TestCase):
             import matplotlib.pyplot as plt
 
             plot_file = Path(tmp) / "e4_mos1.png"
-            fig, (ax_spec, ax_res) = session.plot(
+            fig, (_ax_spec, _ax_res) = session.plot(
                 "east_jet/e4", instrument="mos1", save_path=plot_file
             )
             self.assertTrue(plot_file.exists() and plot_file.stat().st_size > 0)
@@ -325,3 +326,112 @@ class TestSherpaOOP(unittest.TestCase):
                 loaded_rep.param("mos1__calibration__cal.c0")["val"],
                 places=6,
             )
+
+
+class TestSherpaCollectionActiveFiltering(unittest.TestCase):
+    def test_from_manifest_skips_inactive_regions_unless_requested(self):
+        from xmm_tools.esas.spectrum import (
+            InstrumentSpectrumProducts,
+            RegionSpectrumResult,
+            SpectrumResult,
+        )
+        from xmm_tools.sherpa.dataset import SpectrumCollection, SpectrumDataset
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sdir = root / "spectrum"
+            r_active = sdir / "active_reg"
+            r_inactive = sdir / "removed_reg"
+            for rdir in (r_active, r_inactive):
+                rdir.mkdir(parents=True, exist_ok=True)
+                for fname in ("mos1S001-fovt.pi", "mos1S001-bkg.pi", "mos1S001.rmf", "mos1S001.arf"):
+                    (rdir / fname).write_text("fits", encoding="utf-8")
+
+            spec_res = SpectrumResult(
+                spectrum_dir=sdir,
+                manifest_path=sdir / "manifest.json",
+                workspace_root=root,
+                regions={
+                    "active_reg": RegionSpectrumResult(
+                        key="active_reg",
+                        group="active_reg",
+                        label="active_reg",
+                        mode="single",
+                        region_dir=r_active,
+                        source_file=root / "a.reg",
+                        elow=500,
+                        ehigh=2000,
+                        active=True,
+                        instruments={
+                            "mos1": InstrumentSpectrumProducts(
+                                fovt=r_active / "mos1S001-fovt.pi",
+                                bkg=r_active / "mos1S001-bkg.pi",
+                                rmf=r_active / "mos1S001.rmf",
+                                arf=r_active / "mos1S001.arf",
+                                event_count=10,
+                            )
+                        },
+                    ),
+                    "removed_reg": RegionSpectrumResult(
+                        key="removed_reg",
+                        group="removed_reg",
+                        label="removed_reg",
+                        mode="single",
+                        region_dir=r_inactive,
+                        source_file=root / "b.reg",
+                        elow=500,
+                        ehigh=2000,
+                        active=False,
+                        instruments={
+                            "mos1": InstrumentSpectrumProducts(
+                                fovt=r_inactive / "mos1S001-fovt.pi",
+                                bkg=r_inactive / "mos1S001-bkg.pi",
+                                rmf=r_inactive / "mos1S001.rmf",
+                                arf=r_inactive / "mos1S001.arf",
+                                event_count=10,
+                            )
+                        },
+                    ),
+                },
+            )
+            spec_res.save_manifest()
+
+            def fake_from_files(cls, ds_id, *, region_key, instrument, **kwargs):
+                return SpectrumDataset(
+                    ds_id=ds_id,
+                    region_key=region_key,
+                    instrument=instrument,
+                    pha_path=Path(kwargs["pha_path"]),
+                    pha=None,
+                    rmf=None,
+                    arf=None,
+                )
+
+            with patch.object(SpectrumDataset, "from_files", classmethod(fake_from_files)):
+                col_default = SpectrumCollection.from_manifest(spec_res.manifest_path)
+                self.assertEqual(col_default.regions, ["active_reg"])
+
+                col_all = SpectrumCollection.from_manifest(
+                    spec_res.manifest_path, include_inactive=True
+                )
+                self.assertEqual(col_all.regions, ["active_reg", "removed_reg"])
+
+                for bad_status in ("failed", "running", "partial"):
+                    spec_res.manifest.status = bad_status
+                    spec_res.save_manifest()
+                    with self.assertRaises(RuntimeError):
+                        SpectrumCollection.from_manifest(spec_res.manifest_path)
+
+                spec_res.manifest.status = "partial"
+                spec_res.save_manifest()
+                col_partial = SpectrumCollection.from_manifest(
+                    spec_res.manifest_path, allow_partial=True
+                )
+                self.assertEqual(col_partial.regions, ["active_reg"])
+
+                spec_res.manifest.status = "failed"
+                spec_res.save_manifest()
+                with self.assertRaises(RuntimeError):
+                    SpectrumCollection.from_manifest(
+                        spec_res.manifest_path, allow_partial=True
+                    )

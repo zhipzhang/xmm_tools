@@ -24,6 +24,7 @@ from xmm_tools.config.schema import (
     default_qpb_bands,
 )
 from xmm_tools.exec.env import SASEnv
+from xmm_tools.exec.paths import resolve_workspace_path
 
 
 def _table(raw: Mapping[str, Any], key: str) -> dict[str, Any]:
@@ -97,9 +98,7 @@ def load_ana_config(path: str | Path) -> AnaConfig:
 
     paths_sec = _table(raw, "paths")
     workdir_raw = paths_sec.get("workdir", ".")
-    workdir = Path(workdir_raw)
-    if not workdir.is_absolute():
-        workdir = (toml_path.parent / workdir).resolve()
+    workdir = resolve_workspace_path(toml_path.parent, workdir_raw)
 
     env = SASEnv.from_mapping(_table(raw, "env"), base_dir=workdir)
 
@@ -166,7 +165,7 @@ def load_ana_config(path: str | Path) -> AnaConfig:
     spectrum = SpectrumConfig(
         max_workers=int(spec_sec.get("max_workers", 2)),
         elow=int(spec_sec.get("elow", 400)),
-        ehigh=int(spec_sec.get("ehigh", 12500)),
+        ehigh=int(spec_sec.get("ehigh", 7200)),
         pattern_mos=int(spec_sec.get("pattern_mos", 12)),
         pattern_pn=int(spec_sec.get("pattern_pn", 4)),
         withsrcrem=bool(spec_sec.get("withsrcrem", True)),

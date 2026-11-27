@@ -99,6 +99,39 @@ class TestPathsAndWorkspace(unittest.TestCase):
             normalize_lexical_path(sibling_file),
         )
 
+    def test_workspace_relative_path_handles_ancestor_symlink_without_dereferencing_leaf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            real_ws = base / "real_ws"
+            (real_ws / "spectrum").mkdir(parents=True)
+            reg = real_ws / "east_jet.reg"
+            reg.write_text("fk5\n", encoding="utf-8")
+
+            outside = base / "outside.fits"
+            outside.write_text("out", encoding="utf-8")
+            leaf_link = real_ws / "spectrum" / "leaf.fits"
+            leaf_link.symlink_to(outside)
+
+            alias_ws = base / "alias_ws"
+            alias_ws.symlink_to(real_ws)
+
+            self.assertEqual(
+                workspace_relative_path(
+                    alias_ws / "east_jet.reg",
+                    real_ws / "spectrum",
+                    workspace_root=real_ws,
+                ),
+                "../east_jet.reg",
+            )
+            self.assertEqual(
+                workspace_relative_path(
+                    alias_ws / "spectrum" / "leaf.fits",
+                    real_ws / "spectrum",
+                    workspace_root=real_ws,
+                ),
+                "leaf.fits",
+            )
+
     def test_relative_symlink_and_publish_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

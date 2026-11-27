@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from xmm_tools.exec.env import SASEnv
+from xmm_tools.exec.paths import normalize_lexical_path, resolve_workspace_path
 
 VALID_REGION_MODES = ("single", "split", "union")
 
@@ -22,14 +23,7 @@ class PathsConfig:
     spectrum_dir: str = "spectrum"
 
     def resolve(self, sub: str | Path) -> Path:
-        p = Path(sub)
-        if p.is_absolute():
-            return p
-        return (
-            (self.workdir / p).resolve()
-            if not self.workdir.is_absolute()
-            else self.workdir / p
-        )
+        return resolve_workspace_path(normalize_lexical_path(self.workdir), sub)
 
 
 @dataclass
@@ -129,14 +123,25 @@ class SpectrumRegionSpec:
             raise ValueError("Spectrum region 'name' must not be empty")
         if not self.file.strip():
             raise ValueError("Spectrum region 'file' must not be empty")
+        if self.elow is not None and (self.elow < 1 or self.elow >= 11995):
+            raise ValueError(
+                f"Invalid energy bounds for spectrum region {self.name!r}: "
+                f"elow={self.elow} (expected 1 <= elow < 11995)"
+            )
+        if self.ehigh is not None and (self.ehigh <= 1 or self.ehigh > 11995):
+            raise ValueError(
+                f"Invalid energy bounds for spectrum region {self.name!r}: "
+                f"ehigh={self.ehigh} (expected 2 <= ehigh <= 11995)"
+            )
         if (
             self.elow is not None
             and self.ehigh is not None
-            and (self.elow < 0 or self.elow >= self.ehigh)
+            and self.elow >= self.ehigh
         ):
             raise ValueError(
                 f"Invalid energy bounds for spectrum region {self.name!r}: "
-                f"elow={self.elow}, ehigh={self.ehigh}"
+                f"elow={self.elow}, ehigh={self.ehigh} "
+                "(expected 1 <= elow < ehigh <= 11995)"
             )
 
 
@@ -146,7 +151,7 @@ class SpectrumConfig:
 
     max_workers: int = 2
     elow: int = 400
-    ehigh: int = 12500
+    ehigh: int = 7200
     pattern_mos: int = 12
     pattern_pn: int = 4
     withsrcrem: bool = True
@@ -164,10 +169,10 @@ class SpectrumConfig:
             raise ValueError(
                 f"Invalid spectrum max_workers={self.max_workers}; must be >= 1"
             )
-        if self.elow < 0 or self.elow >= self.ehigh:
+        if not (1 <= self.elow < self.ehigh <= 11995):
             raise ValueError(
                 f"Invalid spectrum energy bounds: elow={self.elow}, ehigh={self.ehigh} "
-                "(expected 0 <= elow < ehigh)"
+                "(expected 1 <= elow < ehigh <= 11995)"
             )
         seen_names: set[str] = set()
         for reg in self.regions:

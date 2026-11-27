@@ -7,7 +7,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from xmm_tools.exec import MANIFEST_SCHEMA_VERSION, SASCommandError
+from xmm_tools.exec import (
+    MANIFEST_SCHEMA_VERSION,
+    SASCommandError,
+    normalize_lexical_path,
+)
 from xmm_tools.exec.runner import RunResult
 from xmm_tools.pipeline import AnaConfig, render_template_toml
 from xmm_tools.sas import (
@@ -36,10 +40,10 @@ class TestESASConfig(unittest.TestCase):
 
             cfg = AnaConfig.from_toml(toml_path)
             self.assertEqual(str(cfg.env.sas_ccf), "/data/ccf.cif")
-            self.assertEqual(cfg.paths.workdir, root.resolve())
+            self.assertEqual(cfg.paths.workdir, normalize_lexical_path(root))
             self.assertEqual(
                 cfg.paths.resolve(cfg.paths.flare_dir),
-                root.resolve() / "soft_proton_flare",
+                normalize_lexical_path(root / "soft_proton_flare"),
             )
             self.assertEqual(
                 cfg.instruments.active_mos(),

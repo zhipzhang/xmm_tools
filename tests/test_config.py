@@ -100,10 +100,21 @@ subbands = [[500, 2500]]
                 AnaConfig.from_toml(toml_path)
 
     def test_validation_rejects_invalid_spectrum_and_duplicate_regions(self):
+        self.assertEqual(SpectrumConfig().ehigh, 7200)
         with self.assertRaises(ValueError):
             SpectrumConfig(max_workers=0)
         with self.assertRaises(ValueError):
             SpectrumConfig(elow=5000, ehigh=1000)
+        with self.assertRaises(ValueError):
+            SpectrumConfig(elow=0, ehigh=7200)
+        with self.assertRaises(ValueError):
+            SpectrumConfig(elow=400, ehigh=11996)
+        with self.assertRaises(ValueError):
+            SpectrumRegionSpec(name="bad_low", file="a.reg", elow=0, ehigh=7200)
+        with self.assertRaises(ValueError):
+            SpectrumRegionSpec(name="bad_high", file="a.reg", ehigh=11996)
+        with self.assertRaises(ValueError):
+            SpectrumRegionSpec(name="bad_order", file="a.reg", elow=5000, ehigh=1000)
         with self.assertRaises(ValueError):
             SpectrumConfig(
                 regions=[

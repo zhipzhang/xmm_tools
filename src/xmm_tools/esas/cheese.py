@@ -3,26 +3,37 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-import json
 from pathlib import Path
 from typing import Any, Protocol
 
+from xmm_tools.config import AnaConfig
 from xmm_tools.esas.flare import FlareResult, load_flare_result
-from xmm_tools.exec.command import SASCommand
-from xmm_tools.exec.runner import SASRunner
-from xmm_tools.pipeline.config import AnaConfig
-from xmm_tools.pipeline.stage import (
-    StageManifest,
-    all_nonempty,
-    read_manifest_json,
-    relativize_manifest_paths,
-    resolve_manifest_paths,
+from xmm_tools.esas.naming import (
+    env_calibration_inputs,
+    load_stage_manifest_payload,
+    relativize_path_map,
+    resolve_path_map,
+    save_stage_manifest,
+    strip_esas_suffix,
+    validate_scalar_extra_params,
 )
+from xmm_tools.exec import (
+    SASCommand,
+    SASRunner,
+    StageManifest,
+    StageWorkspace,
+    StepLedger,
+    is_nonempty_file,
+    normalize_lexical_path,
+    resolve_workspace_path,
+    workspace_relative_path,
+)
+
+_CHEESE_RESERVED_PARAMS = frozenset({"mos1file", "mos2file", "pnfile", "pnootfile"})
 
 
 @dataclass
-class CheeseResult(StageManifest):
+class CheeseResult:
     """Core artifacts produced by the ``cheese`` stage."""
 
     cheese_dir: Path
@@ -32,31 +43,73 @@ class CheeseResult(StageManifest):
     cheese_masks: dict[str, Path] = field(default_factory=dict)
     region_det: dict[str, Path] = field(default_factory=dict)
     region_sky: dict[str, Path] = field(default_factory=dict)
+    workspace_root: Path | None = None
+    manifest: StageManifest | None = None
 
-    def to_manifest_dict(self) -> dict[str, object]:
-        return {
-            "stage": "cheese",
+    def save_manifest(self) -> Path:
+        """Persist a v2 ``manifest.json`` preserving ``workspace_root`` portability."""
+        ws_root = self.workspace_root
+        products_payload: dict[str, Any] = {
             "method": self.method,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "emllist": self.emllist.name if self.emllist is not None else None,
-            "cheese_masks": relativize_manifest_paths(self.cheese_masks),
-            "region_det": relativize_manifest_paths(self.region_det),
-            "region_sky": relativize_manifest_paths(self.region_sky),
+            "emllist": (
+                workspace_relative_path(
+                    self.emllist, self.cheese_dir, workspace_root=ws_root
+                )
+                if self.emllist is not None
+                else None
+            ),
+            "cheese_masks": relativize_path_map(
+                self.cheese_masks, self.cheese_dir, workspace_root=ws_root
+            ),
+            "region_det": relativize_path_map(
+                self.region_det, self.cheese_dir, workspace_root=ws_root
+            ),
+            "region_sky": relativize_path_map(
+                self.region_sky, self.cheese_dir, workspace_root=ws_root
+            ),
         }
+        self.manifest, written = save_stage_manifest(
+            self.manifest_path,
+            self.cheese_dir,
+            stage="cheese",
+            products=products_payload,
+            existing_manifest=self.manifest,
+            workspace_root=ws_root,
+        )
+        return written
 
     @classmethod
-    def from_manifest(cls, manifest_path: Path) -> CheeseResult:
-        raw = read_manifest_json(manifest_path)
-        cheese_dir = manifest_path.parent
-        emllist_name = raw.get("emllist")
+    def from_manifest(
+        cls,
+        manifest_path: Path | str,
+        *,
+        workspace_root: Path | str | None = None,
+        require_completed: bool = False,
+    ) -> CheeseResult:
+        """Load a ``CheeseResult`` from a v2 or legacy v1 ``manifest.json``."""
+        mpath = normalize_lexical_path(manifest_path)
+        cdir = mpath.parent
+        ws_root = (
+            normalize_lexical_path(workspace_root)
+            if workspace_root is not None
+            else mpath.parent.parent
+        )
+        stage_manifest, payload = load_stage_manifest_payload(
+            mpath, stage_label="Cheese", require_completed=require_completed
+        )
+        emllist_raw = payload.get("emllist")
         return cls(
-            cheese_dir=cheese_dir,
-            manifest_path=manifest_path,
-            method=str(raw.get("method", "cheese")),
-            emllist=cheese_dir / emllist_name if emllist_name else None,
-            cheese_masks=resolve_manifest_paths(cheese_dir, raw, "cheese_masks"),
-            region_det=resolve_manifest_paths(cheese_dir, raw, "region_det"),
-            region_sky=resolve_manifest_paths(cheese_dir, raw, "region_sky"),
+            cheese_dir=cdir,
+            manifest_path=mpath,
+            method=str(payload.get("method", "cheese")),
+            emllist=(
+                resolve_workspace_path(cdir, str(emllist_raw)) if emllist_raw else None
+            ),
+            cheese_masks=resolve_path_map(cdir, payload.get("cheese_masks")),
+            region_det=resolve_path_map(cdir, payload.get("region_det")),
+            region_sky=resolve_path_map(cdir, payload.get("region_sky")),
+            workspace_root=ws_root,
+            manifest=stage_manifest,
         )
 
 
@@ -74,15 +127,6 @@ class SourceDetector(Protocol):
     ) -> CheeseResult: ...
 
 
-def _stem_from_allevc(path: Path) -> str:
-    """Strip ``-allevc.fits`` (or ``.fits``) to get the ESAS output prefix."""
-    name = path.name
-    for suffix in ("-allevc.fits", "-allevcoot.fits", ".fits"):
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return path.stem
-
-
 class CheeseDetector:
     """Default ESAS ``cheese`` point-source detector and mask generator."""
 
@@ -97,49 +141,55 @@ class CheeseDetector:
         force: bool = False,
         docker_container: str | None = None,
     ) -> CheeseResult:
-        cheese_dir = cfg.paths.resolve(cfg.paths.cheese_dir)
-        manifest_path = cheese_dir / "manifest.json"
-
-        if not force and manifest_path.exists():
-            existing = CheeseResult.from_manifest(manifest_path)
-            active_insts = [k for k in ("mos1", "mos2", "pn") if k in flare.clean_events]
-            if (
-                existing.emllist is not None
-                and existing.emllist.exists()
-                and existing.emllist.stat().st_size > 0
-                and all(k in existing.cheese_masks for k in active_insts)
-                and all_nonempty(existing.cheese_masks)
-                and all_nonempty(existing.region_det)
-                and all_nonempty(existing.region_sky)
-            ):
-                return existing
-
         sd = cfg.cheese
+        extra = validate_scalar_extra_params(
+            sd.extra_params,
+            section="cheese.extra_params",
+            reserved_keys=_CHEESE_RESERVED_PARAMS,
+        )
+
+        cheese_dir = normalize_lexical_path(cfg.paths.resolve(cfg.paths.cheese_dir))
+        ws = StageWorkspace(
+            workspace_root=normalize_lexical_path(cfg.paths.workdir),
+            stage_dir=cheese_dir,
+        )
+        ws.ensure_dirs(dry_run=dry_run)
+
+        work_dir = ws.step_dir("cheese")
         symlinks: dict[str, Path | str] = {}
         params: dict[str, Any] = {}
-        core_outputs: list[str] = ["emllist.fits"]
+        inputs: dict[str, Path] = env_calibration_inputs(cfg, dry_run=dry_run)
+        expected_outputs: list[str] = ["emllist.fits"]
+        publish_names: list[str] = ["emllist.fits"]
 
         cheese_masks: dict[str, Path] = {}
         region_det: dict[str, Path] = {}
         region_sky: dict[str, Path] = {}
 
-        inst_param_map = (
+        for inst_key, param_name in (
             ("mos1", "mos1file"),
             ("mos2", "mos2file"),
             ("pn", "pnfile"),
-        )
-        for inst_key, param_name in inst_param_map:
-            evt_path = flare.clean_events.get(inst_key)
-            if evt_path is None:
+        ):
+            raw_evt = flare.clean_events.get(inst_key)
+            if raw_evt is None:
                 continue
+            evt_path = normalize_lexical_path(raw_evt)
+            if not dry_run and not is_nonempty_file(evt_path):
+                raise FileNotFoundError(
+                    f"Clean event file for {inst_key!r} not found or empty: {evt_path}"
+                )
             symlinks[evt_path.name] = evt_path
             params[param_name] = evt_path.name
+            if not dry_run or is_nonempty_file(evt_path):
+                inputs[inst_key] = evt_path
 
-            prefix = _stem_from_allevc(evt_path)
+            prefix = strip_esas_suffix(evt_path)
             mask_name = f"{prefix}-cheeset.fits"
             det_name = f"{prefix}-bkgregtdet.fits"
             sky_name = f"{prefix}-bkgregtsky.fits"
-            core_outputs.extend([mask_name, det_name, sky_name])
+            expected_outputs.extend([mask_name, det_name, sky_name])
+            publish_names.extend([mask_name, det_name, sky_name])
             cheese_masks[inst_key] = cheese_dir / mask_name
             region_det[inst_key] = cheese_dir / det_name
             region_sky[inst_key] = cheese_dir / sky_name
@@ -149,10 +199,17 @@ class CheeseDetector:
                 "No clean event files found for cheese; run 'xmm-ana flare' first."
             )
 
-        pn_oot_path = flare.clean_events.get("pn_oot")
-        if pn_oot_path is not None:
+        pn_oot_raw = flare.clean_events.get("pn_oot")
+        if pn_oot_raw is not None:
+            pn_oot_path = normalize_lexical_path(pn_oot_raw)
+            if not dry_run and not is_nonempty_file(pn_oot_path):
+                raise FileNotFoundError(
+                    f"Clean PN OOT event file not found or empty: {pn_oot_path}"
+                )
             symlinks[pn_oot_path.name] = pn_oot_path
             params["pnootfile"] = pn_oot_path.name
+            if not dry_run or is_nonempty_file(pn_oot_path):
+                inputs["pn_oot"] = pn_oot_path
 
         params.update(
             {
@@ -165,39 +222,66 @@ class CheeseDetector:
                 "ratehard": sd.ratehard,
                 "ratetotal": sd.ratetotal,
                 "keepinterfiles": sd.keepinterfiles,
+                **extra,
             }
         )
-        params.update(sd.extra_params)
 
-        cmd = SASCommand(
-            program="cheese",
-            cwd=cheese_dir,
-            params=params,
-            symlinks=symlinks,
-            core_outputs=core_outputs,
-            intermediate_dir="_intermediate",
-            log_file="cheese.log",
+        ledger = StepLedger(
+            ws.manifest_path,
+            stage="cheese",
+            workspace_root=ws.workspace_root,
+            config={
+                "method": self.name,
+                "elowlist": list(sd.elowlist),
+                "ehighlist": list(sd.ehighlist),
+                "mlmin": sd.mlmin,
+                "scale": sd.scale,
+            },
+            dry_run=dry_run,
+            force=force,
         )
         runner = SASRunner(
             env=cfg.env,
             dry_run=dry_run,
-            skip_if_exists=not force,
+            skip_if_exists=False,
             docker_container=docker_container,
         )
-        runner.run(cmd, force=force)
+        cmd = SASCommand(
+            program="cheese",
+            cwd=work_dir,
+            params=params,
+            symlinks=symlinks,
+            expected_outputs=expected_outputs,
+            log_file="cheese.log",
+        )
+        ledger.run_step("cheese", runner, cmd, inputs=inputs)
 
-        result = CheeseResult(
+        if not dry_run:
+            for name in publish_names:
+                ws.publish(work_dir / name, name, mode="symlink")
+
+        emllist_path = cheese_dir / "emllist.fits"
+        manifest = ledger.commit(
+            products={
+                "method": self.name,
+                "emllist": emllist_path,
+                "cheese_masks": cheese_masks,
+                "region_det": region_det,
+                "region_sky": region_sky,
+            },
+            prune_unseen_steps=True,
+        )
+        return CheeseResult(
             cheese_dir=cheese_dir,
-            manifest_path=manifest_path,
+            manifest_path=ws.manifest_path,
             method=self.name,
-            emllist=cheese_dir / "emllist.fits",
+            emllist=emllist_path,
             cheese_masks=cheese_masks,
             region_det=region_det,
             region_sky=region_sky,
+            workspace_root=ws.workspace_root,
+            manifest=manifest,
         )
-        if not dry_run:
-            result.save_manifest()
-        return result
 
 
 def run_cheese(
@@ -223,10 +307,13 @@ def run_cheese(
 
 def load_cheese_result(cfg: AnaConfig) -> CheeseResult:
     """Load ``cheese`` outputs from ``manifest.json`` (or scan directory)."""
-    cheese_dir = cfg.paths.resolve(cfg.paths.cheese_dir)
+    cheese_dir = normalize_lexical_path(cfg.paths.resolve(cfg.paths.cheese_dir))
+    ws_root = normalize_lexical_path(cfg.paths.workdir)
     manifest_path = cheese_dir / "manifest.json"
-    if manifest_path.exists():
-        return CheeseResult.from_manifest(manifest_path)
+    if manifest_path.is_file():
+        return CheeseResult.from_manifest(
+            manifest_path, workspace_root=ws_root, require_completed=True
+        )
 
     emllist = cheese_dir / "emllist.fits"
     cheese_masks: dict[str, Path] = {}
@@ -238,23 +325,24 @@ def load_cheese_result(cfg: AnaConfig) -> CheeseResult:
         evt = flare.clean_events.get(inst_key)
         if evt is None:
             continue
-        prefix = _stem_from_allevc(evt)
+        prefix = strip_esas_suffix(evt)
         mask = cheese_dir / f"{prefix}-cheeset.fits"
         det = cheese_dir / f"{prefix}-bkgregtdet.fits"
         sky = cheese_dir / f"{prefix}-bkgregtsky.fits"
-        if mask.exists():
+        if is_nonempty_file(mask):
             cheese_masks[inst_key] = mask
-        if det.exists():
+        if is_nonempty_file(det):
             region_det[inst_key] = det
-        if sky.exists():
+        if is_nonempty_file(sky):
             region_sky[inst_key] = sky
 
     return CheeseResult(
         cheese_dir=cheese_dir,
         manifest_path=manifest_path,
         method="cheese",
-        emllist=emllist if emllist.exists() else None,
+        emllist=emllist if is_nonempty_file(emllist) else None,
         cheese_masks=cheese_masks,
         region_det=region_det,
         region_sky=region_sky,
+        workspace_root=ws_root,
     )
