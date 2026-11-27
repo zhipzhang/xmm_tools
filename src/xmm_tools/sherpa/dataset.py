@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from astropy.io import fits
 import numpy as np
+from astropy.io import fits
 
 from xmm_tools.esas.spectrum import SpectrumResult
 
@@ -30,9 +31,9 @@ def default_diagonal_rmf_path(instrument: str) -> Path | None:
 
 def _require_sherpa() -> dict[str, Any]:
     try:
+        from sherpa.astro.data import DataRMF
         from sherpa.astro.instrument import RMF1D, Response1D
         from sherpa.astro.io import read_arf, read_pha, read_rmf
-        from sherpa.astro.data import DataRMF
     except ImportError as exc:
         raise ImportError(
             "Sherpa is required for xmm_tools.sherpa. "
@@ -156,7 +157,13 @@ class SpectrumDataset:
         )
         if resolved_diag is not None:
             diag_rmf = sh["read_rmf"](str(resolved_diag))
-            diag_rmf.offset = getattr(rmf, "offset", 1)
+            f_chan = getattr(diag_rmf, "f_chan", None)
+            if f_chan is not None and len(f_chan) > 0:
+                min_chan = int(np.min(f_chan))
+                if min_chan == 0:
+                    diag_rmf.offset = 0
+                elif getattr(diag_rmf, "offset", 1) == 0 and min_chan >= 1:
+                    diag_rmf.offset = 1
             if diag_rmf.detchans != rmf.detchans and diag_rmf_path is None:
                 diag_rmf = make_diagonal_rmf(rmf)
         else:
@@ -235,15 +242,31 @@ class SpectrumCollection:
         instruments: Iterable[str] = ("mos1", "mos2", "pn"),
         diag_rmf: dict[str, str | Path] | None = None,
         use_errors: bool = True,
+        include_inactive: bool = False,
+        allow_partial: bool = False,
     ) -> SpectrumCollection:
         """Load active spectra from ``spectrum/manifest.json`` (skipping 0-event instruments)."""
-        spec_res = SpectrumResult.from_manifest(Path(manifest_path))
+        mpath = Path(manifest_path)
+        spec_res = SpectrumResult.from_manifest(
+            mpath, require_completed=not allow_partial
+        )
+        if (
+            allow_partial
+            and spec_res.manifest is not None
+            and spec_res.manifest.status not in {"completed", "reused", "partial"}
+        ):
+            raise RuntimeError(
+                f"Spectrum stage at {mpath} has status {spec_res.manifest.status!r}; "
+                "expected 'completed', 'reused', or 'partial'."
+            )
         selected_regions = set(regions) if regions is not None else None
         inst_filter = tuple(instruments)
         diag_map = diag_rmf or {}
 
         loaded: dict[str, SpectrumDataset] = {}
         for reg_key, reg_res in sorted(spec_res.regions.items()):
+            if not include_inactive and not getattr(reg_res, "active", True):
+                continue
             if selected_regions is not None and reg_key not in selected_regions:
                 continue
             safe_reg = reg_key.replace("/", "__")

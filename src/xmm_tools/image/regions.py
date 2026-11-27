@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Literal
 
-from astropy.coordinates import SkyCoord
 import astropy.units as u
-from astropy.wcs import WCS
 import regions as astropy_regions
+from astropy.coordinates import SkyCoord
+from astropy.wcs import WCS
 
 from xmm_tools.image.fits_io import FitsImageData, sky_to_pixel
 
@@ -129,7 +130,7 @@ def strip_params_from_sky_points(
     sep_arcsec = float(p1.separation(p2).arcsec)
     pa_deg = float(p1.position_angle(p2).deg)
     step = max(width_arcsec + gap_arcsec, 1e-3)
-    count = max(1, int(round(sep_arcsec / step)))
+    count = max(1, round(sep_arcsec / step))
     return StripGridParams(
         start_ra_deg=start_ra_deg,
         start_dec_deg=start_dec_deg,
@@ -267,8 +268,10 @@ def export_ds9_regions(
     out_path = Path(path)
     lines = [
         "# Region file format: DS9 version 4.1",
-        'global color=green dashlist=8 3 width=1 font="helvetica 10 normal roman" '
-        "select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1",
+        (
+            'global color=green dashlist=8 3 width=1 font="helvetica 10 normal roman" '
+            "select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1"
+        ),
         "fk5",
     ]
     for reg in regions:

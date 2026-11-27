@@ -11,10 +11,10 @@ from xmm_tools.sherpa.plotting import plot_fit
 from xmm_tools.sherpa.session import FitReport, JointFitSession
 
 __all__ = [
+    "PIXEL_TO_ARCMIN2",
     "FitReport",
     "JointFitSession",
     "ModelBuilder",
-    "PIXEL_TO_ARCMIN2",
     "SpectrumCollection",
     "SpectrumDataset",
     "make_diagonal_rmf",

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import os
-from pathlib import Path
 import shlex
-from typing import Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 try:
     import tomllib
@@ -21,6 +22,25 @@ _SAS_ENV_KEYS: tuple[tuple[str, str], ...] = (
     ("sas_odf", "SAS_ODF"),
     ("caldb", "CALDB"),
 )
+
+
+def _resolve_env_path(value: object, base_dir: Path) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    if ":" in raw:
+        parts = []
+        for seg in raw.split(":"):
+            seg = seg.strip()
+            if not seg:
+                continue
+            p = Path(seg).expanduser()
+            parts.append(str(p) if p.is_absolute() else str((base_dir / p).resolve()))
+        return ":".join(parts)
+    p = Path(raw).expanduser()
+    return str(p) if p.is_absolute() else str((base_dir / p).resolve())
 
 
 @dataclass
@@ -49,29 +69,52 @@ class SASEnv:
         )
 
     @classmethod
-    def from_toml(cls, path: str | Path) -> SASEnv:
-        """Load ``[env]`` from a TOML configuration file."""
-        toml_path = Path(path)
-        data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-        env_sec = data.get("env", {})
-        if not isinstance(env_sec, dict):
-            raise ValueError(f"Expected [env] table in {toml_path}")
+    def from_mapping(
+        cls,
+        env_table: Mapping[str, Any],
+        *,
+        base_dir: Path | str,
+    ) -> SASEnv:
+        """Build a ``SASEnv`` from an already-parsed ``[env]`` mapping."""
+        if not isinstance(env_table, Mapping):
+            raise TypeError("Expected [env] table in TOML config")
 
+        root = Path(base_dir).resolve()
         known_keys = {attr for attr, _ in _SAS_ENV_KEYS} | {"regions_path"}
         extra: dict[str, str] = {}
-        for k, v in env_sec.items():
+        for k, v in env_table.items():
             if k not in known_keys and isinstance(v, (str, int, float, bool)):
                 extra[str(k)] = str(v)
 
         return cls(
-            sas_dir=env_sec.get("sas_dir"),
-            sas_ccf=env_sec.get("sas_ccf"),
-            sas_ccfpath=env_sec.get("sas_ccfpath"),
-            sas_odf=env_sec.get("sas_odf"),
-            caldb=env_sec.get("caldb"),
-            regions_path=env_sec.get("regions_path"),
+            sas_dir=_resolve_env_path(env_table.get("sas_dir"), root),
+            sas_ccf=_resolve_env_path(env_table.get("sas_ccf"), root),
+            sas_ccfpath=_resolve_env_path(env_table.get("sas_ccfpath"), root),
+            sas_odf=_resolve_env_path(env_table.get("sas_odf"), root),
+            caldb=_resolve_env_path(env_table.get("caldb"), root),
+            regions_path=_resolve_env_path(env_table.get("regions_path"), root),
             extra_env=extra,
         )
+
+    @classmethod
+    def from_toml(
+        cls,
+        path: str | Path,
+        *,
+        base_dir: str | Path | None = None,
+    ) -> SASEnv:
+        """Load ``[env]`` from a TOML configuration file."""
+        toml_path = Path(path)
+        root = (
+            Path(base_dir).resolve()
+            if base_dir is not None
+            else toml_path.resolve().parent
+        )
+        data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+        env_sec = data.get("env", {})
+        if not isinstance(env_sec, Mapping):
+            raise TypeError(f"Expected [env] table in {toml_path}")
+        return cls.from_mapping(env_sec, base_dir=root)
 
     def to_env_dict(
         self, base_env: Mapping[str, str] | None = None
@@ -88,6 +131,8 @@ class SASEnv:
             merged["PYTHONPATH"] = f"{rpath}:{existing_pp}" if existing_pp else rpath
         for k, v in self.extra_env.items():
             merged[k] = str(v)
+        merged.setdefault("HEADASNOQUERY", "1")
+        merged.setdefault("HEADASPROMPT", "/dev/null")
         return merged
 
     def validate(

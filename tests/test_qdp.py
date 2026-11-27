@@ -1,11 +1,17 @@
 """Tests for XMM-Newton QDP parsing and GUI state helpers."""
 
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
-from xmm_tools.qdp import load_qdp, parse_qdp_text
-from xmm_tools.qdp.gui import QDPViewerState, _filter_series_arrays
+from xmm_tools.qdp import filter_series_arrays, load_qdp, parse_qdp_text
+
+try:
+    from xmm_tools.qdp.gui import QDPViewerState
+except ModuleNotFoundError as exc:
+    if exc.name != "imgui_bundle" and not (exc.name or "").startswith("imgui_bundle."):
+        raise
+    QDPViewerState = None  # type: ignore[assignment,misc]
 
 
 EXAMPLE_HIST = Path(
@@ -81,7 +87,7 @@ NO NO NO NO NO NO
         self.assertGreater(len(data.windows[0].labels), 0)
 
         # Verify sentinel -1.0 filtering and log filtering
-        xs, ys, _, _ = _filter_series_arrays(
+        xs, ys, _, _ = filter_series_arrays(
             data.series[0], hide_minus_one=True, log_x=False, log_y=False
         )
         self.assertEqual(len(xs), 657)
@@ -105,11 +111,15 @@ NO NO NO NO NO NO
         self.assertTrue(data.series[0].visible)
         self.assertFalse(data.series[1].visible)  # line off 3 / col off 3
 
-        state = QDPViewerState(recent_store_path=Path(tempfile.mkdtemp()) / "recent.json")
-        state.open_file(EXAMPLE_BKGSPEC)
-        self.assertEqual(state.error_message, "")
-        self.assertIsNotNone(state.data)
+        if QDPViewerState is not None:
+            state = QDPViewerState(
+                recent_store_path=Path(tempfile.mkdtemp()) / "recent.json"
+            )
+            state.open_file(EXAMPLE_BKGSPEC)
+            self.assertEqual(state.error_message, "")
+            self.assertIsNotNone(state.data)
 
+    @unittest.skipIf(QDPViewerState is None, "imgui_bundle not installed")
     def test_recent_files_persistence(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Path(tmp) / "recent.json"

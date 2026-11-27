@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-import re
 from typing import Any
 
-from astropy.table import Table
 import numpy as np
-
+from astropy.table import Table
 
 _LABEL_POS_RE = re.compile(
     r"^la(?:b)?\s+(\d+)\s+p\s+([+-]?\S+)\s+([+-]?\S+)\s+(.*)$",
@@ -103,11 +102,42 @@ def _parse_qdp_float(token: str) -> float:
 
 def _strip_quotes(text: str) -> str:
     text = text.strip()
-    if text.startswith('"'):
-        text = text[1:]
-    if text.endswith('"'):
-        text = text[:-1]
+    text = text.removeprefix('"')
+    text = text.removesuffix('"')
     return text.strip()
+
+
+def filter_series_arrays(
+    series: QDPSeries,
+    *,
+    hide_minus_one: bool,
+    log_x: bool,
+    log_y: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+    """Return contiguous float64 arrays filtered for NaN/Inf, sentinel -1, and log<=0."""
+    mask = np.isfinite(series.x) & np.isfinite(series.y)
+    if hide_minus_one:
+        mask &= series.y != -1.0
+    if log_x:
+        mask &= series.x > 0.0
+    if log_y:
+        mask &= series.y > 0.0
+
+    xs = np.ascontiguousarray(series.x[mask], dtype=np.float64)
+    ys = np.ascontiguousarray(series.y[mask], dtype=np.float64)
+
+    yerr_lo: np.ndarray | None = None
+    yerr_hi: np.ndarray | None = None
+    if series.yerr_low is not None and series.yerr_high is not None:
+        lo = np.where(np.isfinite(series.yerr_low[mask]), series.yerr_low[mask], 0.0)
+        hi = np.where(np.isfinite(series.yerr_high[mask]), series.yerr_high[mask], 0.0)
+        if log_y:
+            # Clamp lower error so y - err_lo stays strictly positive on log10 plots
+            lo = np.minimum(lo, ys * 0.999)
+        yerr_lo = np.ascontiguousarray(np.maximum(lo, 0.0), dtype=np.float64)
+        yerr_hi = np.ascontiguousarray(np.maximum(hi, 0.0), dtype=np.float64)
+
+    return xs, ys, yerr_lo, yerr_hi
 
 
 def _parse_command(

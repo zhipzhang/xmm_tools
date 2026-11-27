@@ -23,12 +23,12 @@ with full support for XMM PLT directives (``viewport``, ``win``, ``yplot``,
 ``xmm-img`` — FITS Flux Image & DS9 Region Tool
 -----------------------------------------------
 
-Inspect FITS flux images (such as ``quick_image`` outputs) and interactively
-build DS9 ``fk5`` sky regions for ``xmm-esas spectrum``:
+Inspect FITS flux images (such as ``qpb_image`` outputs) and interactively
+build DS9 ``fk5`` sky regions for ``xmm-ana spectrum``:
 
 .. code-block:: bash
 
-   xmm-img esas_work/quick_image/soft_500_2000_flux.fits
+   xmm-img esas_work/qpb_image/soft_500_2000_flux.fits
 
 Key capabilities:
 
@@ -36,25 +36,25 @@ Key capabilities:
   smoothing, interactive colorbar and contrast controls.
 - **Strip Grid Generator**: draggable origin & position angle, continuous
   equal-width boxes with ``text={label}`` prefixes (directly compatible with
-  ``xmm-esas spectrum`` ``mode = "split"``), and single-edge height stretching.
+  ``xmm-ana spectrum`` ``mode = "split"``), and single-edge height stretching.
 - **Manual Shapes & Live Editor**: add Circle, Ellipse, Box, or Polygon; drag
   center handles on the canvas; edit parameters live; load/save standard DS9
   ``.reg`` files via ``astropy-regions``.
 
-Wiring Saved Regions into ``esas.toml``
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Wiring Saved Regions into ``ana.toml``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 After saving a DS9 ``.reg`` file from ``xmm-img`` (for example,
-``regions/east_jet_bins.reg``), add a matching ``[[spectrum.regions]]`` block
-to ``esas.toml``:
+``regions/east_jet_bins.reg``), add a matching ``[[esas.spectrum.regions]]`` block
+to ``ana.toml``:
 
 .. code-block:: toml
 
-   [[spectrum.regions]]
+   [[esas.spectrum.regions]]
    name = "east_jet"
    file = "regions/east_jet_bins.reg"
    mode = "split"       # Each labeled box becomes spectrum/east_jet/<label>/
    overwrite = false
 
-Then run ``xmm-esas run --config esas.toml`` (or ``xmm-esas spectrum``) to
+Then run ``xmm-ana run --config ana.toml`` (or ``xmm-ana spectrum``) to
 extract spectra and particle backgrounds for every bin automatically.

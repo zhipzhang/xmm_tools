@@ -1,11 +1,14 @@
 """Tests for generic SASEnv and SASRunner command wrapper."""
 
-from pathlib import Path
+import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from xmm_tools.sas import SASCommand, SASCommandError, SASEnv, SASRunner
+from xmm_tools.exec import SASCommand, SASCommandError, SASEnv, SASRunner
+from xmm_tools.exec.runner import _DOCKER_MOUNT_CACHE
 
 
 class TestSASEnv(unittest.TestCase):
@@ -41,10 +44,54 @@ CUSTOM_FLAG = "1"
             self.assertIn("export SAS_CCF=", exports)
             self.assertIn("export CUSTOM_FLAG=1", exports)
 
+    def test_from_toml_resolves_relative_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "ccf.cif").write_text("ccf", encoding="utf-8")
+            (root / "SUM.SAS").write_text("odf", encoding="utf-8")
+            cfg = root / "esas.toml"
+            cfg.write_text(
+                """\
+[env]
+sas_ccf = "ccf.cif"
+sas_ccfpath = "/ccf/valid"
+sas_odf = "SUM.SAS"
+regions_path = ""
+""",
+                encoding="utf-8",
+            )
+
+            env = SASEnv.from_toml(cfg)
+            self.assertEqual(env.sas_ccf, str((root / "ccf.cif").resolve()))
+            self.assertEqual(env.sas_odf, str((root / "SUM.SAS").resolve()))
+            self.assertEqual(env.sas_ccfpath, "/ccf/valid")
+            self.assertEqual(env.regions_path, "")
+            env.validate(check_paths=True)
+
     def test_validate_missing_raises(self):
         env = SASEnv()
         with self.assertRaises(ValueError):
             env.validate()
+
+    def test_headless_heasoft_defaults_and_overrides(self):
+        env = SASEnv()
+        merged = env.to_env_dict(base_env={"PATH": "/usr/bin"})
+        self.assertEqual(merged["HEADASNOQUERY"], "1")
+        self.assertEqual(merged["HEADASPROMPT"], "/dev/null")
+
+        # Explicit overrides in base_env or extra_env must be preserved
+        merged_base = env.to_env_dict(
+            base_env={"HEADASNOQUERY": "0", "HEADASPROMPT": "/dev/tty"}
+        )
+        self.assertEqual(merged_base["HEADASNOQUERY"], "0")
+        self.assertEqual(merged_base["HEADASPROMPT"], "/dev/tty")
+
+        override_env = SASEnv(
+            extra_env={"HEADASNOQUERY": "0", "HEADASPROMPT": "/custom/tty"}
+        )
+        merged_extra = override_env.to_env_dict(base_env={})
+        self.assertEqual(merged_extra["HEADASNOQUERY"], "0")
+        self.assertEqual(merged_extra["HEADASPROMPT"], "/custom/tty")
 
 
 class TestSASCommandAndRunner(unittest.TestCase):
@@ -70,7 +117,7 @@ class TestSASCommandAndRunner(unittest.TestCase):
         self.assertIn("ln -sfn ../soft_proton_flare/mos1S001-allevc.fits mos1S001-allevc.fits", shell)
         self.assertIn("'elowlist=350 2500'", shell)
 
-    def test_runner_executes_isolates_intermediate_and_skips(self):
+    def test_runner_executes_and_skips(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             src_dir = root / "src"
@@ -83,15 +130,13 @@ class TestSASCommandAndRunner(unittest.TestCase):
             script = (
                 "from pathlib import Path; "
                 "Path('core.fits').write_text('core_data'); "
-                "Path('junk1.tmp').write_text('temp1'); "
-                "Path('junk2.tmp').write_text('temp2'); "
                 "print('SAS_CCF=' + __import__('os').environ.get('SAS_CCF', ''))"
             )
             cmd = SASCommand(
                 program=sys.executable,
                 cwd=work_dir,
                 params={"-c": None},  # overridden below via subclass/helper test
-                core_outputs=["core.fits"],
+                expected_outputs=["core.fits"],
                 symlinks={"linked.fits": input_file},
             )
             # Test dry_run first
@@ -109,18 +154,15 @@ class TestSASCommandAndRunner(unittest.TestCase):
             real_cmd = _InlineCmd(
                 program="mock_sas",
                 cwd=work_dir,
-                core_outputs=["core.fits"],
+                expected_outputs=["core.fits"],
                 symlinks={"linked.fits": input_file},
-                intermediate_dir="_intermediate",
             )
             runner = SASRunner(env=env, skip_if_exists=True)
             res = runner.run(real_cmd)
             self.assertEqual(res.status, "completed")
             self.assertTrue((work_dir / "core.fits").exists())
             self.assertTrue((work_dir / "linked.fits").is_symlink())
-            self.assertFalse((work_dir / "junk1.tmp").exists())
-            self.assertTrue((work_dir / "_intermediate" / "junk1.tmp").exists())
-            self.assertTrue((work_dir / "_intermediate" / "junk2.tmp").exists())
+            self.assertFalse(Path(os.readlink(work_dir / "linked.fits")).is_absolute())
             self.assertIn("SAS_CCF=/data/ccf.cif", (work_dir / "execution.log").read_text())
 
             # Re-running with skip_if_exists=True should skip
@@ -147,14 +189,144 @@ class TestSASCommandAndRunner(unittest.TestCase):
                     )
                 )
 
+    def test_runner_isolates_heasoft_pfiles_per_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+            script = "import os; print('PFILES=' + os.environ.get('PFILES', ''))"
+
+            class _PrintPfilesCmd(SASCommand):
+                def argv(self) -> list[str]:
+                    return [sys.executable, "-c", script]
+
+            env = SASEnv(
+                extra_env={"PFILES": "/home/xmmsas/pfiles;/usr/local/heasoft/syspfiles"}
+            )
+            runner = SASRunner(env=env, skip_if_exists=False)
+            res = runner.run(
+                _PrintPfilesCmd(
+                    program="mock_sas",
+                    cwd=work_dir,
+                    expected_outputs=[],
+                )
+            )
+            log_text = res.log_path.read_text(encoding="utf-8").strip()
+            self.assertTrue(log_text.startswith("PFILES="))
+            pfiles_val = log_text.split("=", 1)[1]
+            user_dir, sys_dir = pfiles_val.split(";", 1)
+            self.assertEqual(sys_dir, "/usr/local/heasoft/syspfiles")
+            self.assertNotEqual(user_dir, "/home/xmmsas/pfiles")
+            self.assertIn("xmm_pfiles_", user_dir)
+            # Temporary pfiles directory is cleaned up after subprocess exits
+            self.assertFalse(Path(user_dir).exists())
+
     def test_docker_exec_argv(self):
         env = SASEnv(sas_ccf="/ccf.cif")
         runner = SASRunner(env=env, docker_container="xmmsas_box")
+        self.assertFalse(runner.skip_if_exists)
         cmd = SASCommand(program="espfilt", cwd="/work/flare", params={"elow": 2500})
-        exec_argv = runner._build_exec_argv(cmd)
+        with patch("subprocess.run", side_effect=FileNotFoundError("no docker")):
+            _DOCKER_MOUNT_CACHE.pop("xmmsas_box", None)
+            exec_argv = runner._build_exec_argv(cmd)
         self.assertEqual(exec_argv[:5], ["docker", "exec", "-w", "/work/flare", "-e"])
         self.assertIn("xmmsas_box", exec_argv)
+        self.assertIn("bash", exec_argv)
+        self.assertIn("-lc", exec_argv)
+        self.assertIn("--", exec_argv)
         self.assertEqual(exec_argv[-2:], ["espfilt", "elow=2500"])
+        script_idx = exec_argv.index("-lc") + 1
+        self.assertIn("HEADASNOQUERY", exec_argv[script_idx])
+        self.assertIn("HEADASPROMPT", exec_argv[script_idx])
+
+    def test_docker_mounts_translate_cwd_and_env_vars(self):
+        env = SASEnv(
+            sas_ccf="/Users/me/work/obs1/ccf.cif",
+            sas_ccfpath="/Users/me/work/ccf:/Users/me/work/ccf_extra",
+            sas_odf="/Users/me/work/obs1/SUM.SAS",
+            regions_path="/Users/me/work/py_regions",
+        )
+        runner = SASRunner(
+            env=env,
+            docker_container="xmmsas_box",
+            docker_mounts=[
+                ("/Users/me/work", "/home/xmmsas/mywork"),
+                ("/Users/me/work/ccf", "/ccf"),
+            ],
+        )
+        cmd = SASCommand(
+            program="espfilt",
+            cwd="/Users/me/work/obs1/flare",
+            params={"elow": 2500},
+        )
+        exec_argv = runner._build_exec_argv(cmd)
+        w_idx = exec_argv.index("-w")
+        self.assertEqual(exec_argv[w_idx + 1], "/home/xmmsas/mywork/obs1/flare")
+        env_args = {
+            kv.split("=", 1)[0]: kv.split("=", 1)[1]
+            for i, tok in enumerate(exec_argv)
+            if tok == "-e"
+            for kv in [exec_argv[i + 1]]
+        }
+        self.assertEqual(env_args["SAS_CCF"], "/home/xmmsas/mywork/obs1/ccf.cif")
+        self.assertEqual(
+            env_args["SAS_CCFPATH"],
+            "/ccf:/home/xmmsas/mywork/ccf_extra",
+        )
+        self.assertEqual(env_args["SAS_ODF"], "/home/xmmsas/mywork/obs1/SUM.SAS")
+        self.assertEqual(env_args["PYTHONPATH"], "/home/xmmsas/mywork/py_regions")
+
+    def test_runner_isolates_pfiles_when_unset_and_with_headas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+            headas_dir = Path(tmp) / "heasoft"
+            (headas_dir / "syspfiles").mkdir(parents=True)
+            script = "import os; print('PFILES=' + os.environ.get('PFILES', ''))"
+
+            class _PrintPfilesCmd(SASCommand):
+                def argv(self) -> list[str]:
+                    return [sys.executable, "-c", script]
+
+            clean_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+            with patch.dict(os.environ, clean_env, clear=True):
+                runner = SASRunner(env=SASEnv(), skip_if_exists=False)
+                res = runner.run(
+                    _PrintPfilesCmd(program="mock_sas", cwd=work_dir)
+                )
+                pfiles_val = res.log_path.read_text(encoding="utf-8").strip().split("=", 1)[1]
+                self.assertIn("xmm_pfiles_", pfiles_val)
+                self.assertNotIn(";", pfiles_val)
+                self.assertFalse(Path(pfiles_val).exists())
+
+                runner_headas = SASRunner(
+                    env=SASEnv(extra_env={"HEADAS": str(headas_dir)}),
+                    skip_if_exists=False,
+                )
+                res2 = runner_headas.run(
+                    _PrintPfilesCmd(program="mock_sas", cwd=work_dir)
+                )
+                pfiles_val2 = res2.log_path.read_text(encoding="utf-8").strip().split("=", 1)[1]
+                user_pf, sys_pf = pfiles_val2.split(";", 1)
+                self.assertIn("xmm_pfiles_", user_pf)
+                self.assertEqual(sys_pf, f"{headas_dir}/syspfiles")
+                self.assertFalse(Path(user_pf).exists())
+
+    def test_runner_wraps_oserror_on_missing_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+            runner = SASRunner(env=SASEnv())
+            cmd = SASCommand(
+                program="definitely_missing_sas_binary_xyz",
+                cwd=work_dir,
+                log_file="missing.log",
+            )
+            with self.assertRaises(SASCommandError) as ctx:
+                runner.run(cmd)
+            err = ctx.exception
+            self.assertIsNotNone(err.result)
+            self.assertEqual(err.result.status, "failed")
+            self.assertIsNone(err.result.returncode)
+            self.assertIsNotNone(err.result.log_path)
+            self.assertTrue(err.result.log_path.is_file())
+            self.assertIn("definitely_missing_sas_binary_xyz", err.result.log_path.read_text())
 
 
 if __name__ == "__main__":
