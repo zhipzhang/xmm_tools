@@ -1,6 +1,8 @@
 """Backward-compatible re-export shim for ``xmm_tools.config``."""
 
 from xmm_tools.config import (
+    VALID_BKGRATE_STYLES,
+    VALID_RADIUS_STYLES,
     VALID_REGION_MODES,
     AnaConfig,
     BandSpec,
@@ -8,6 +10,7 @@ from xmm_tools.config import (
     EspfiltConfig,
     FlareConfig,
     InstrumentsConfig,
+    MaskConfig,
     PathsConfig,
     QPBImageConfig,
     SpectrumConfig,
@@ -17,6 +20,8 @@ from xmm_tools.config import (
 )
 
 __all__ = [
+    "VALID_BKGRATE_STYLES",
+    "VALID_RADIUS_STYLES",
     "VALID_REGION_MODES",
     "AnaConfig",
     "BandSpec",
@@ -24,6 +29,7 @@ __all__ = [
     "EspfiltConfig",
     "FlareConfig",
     "InstrumentsConfig",
+    "MaskConfig",
     "PathsConfig",
     "QPBImageConfig",
     "SpectrumConfig",

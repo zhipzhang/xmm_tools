@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ from xmm_tools.exec.env import SASEnv
 from xmm_tools.exec.paths import normalize_lexical_path, resolve_workspace_path
 
 VALID_REGION_MODES = ("single", "split", "union")
+VALID_RADIUS_STYLES = ("contour", "enfrac", "userfixed")
+VALID_BKGRATE_STYLES = ("col", "user")
 
 
 @dataclass
@@ -103,6 +106,71 @@ class CheeseConfig:
 
 
 @dataclass
+class MaskConfig:
+    """Parameters for SAS ``region`` custom point-source mask generation."""
+
+    radius_style: str = "contour"
+    bkg_fraction: float = 0.4
+    bkgrate_style: str = "col"
+    bkgrate_user: float = 1.0
+    nosrcellipse: bool = False
+    energy_fraction: float = 0.85
+    fixed_radius: float = 25.0
+    expression: str = ""
+    extra_params: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.radius_style not in VALID_RADIUS_STYLES:
+            raise ValueError(
+                f"Invalid mask radius_style {self.radius_style!r}; "
+                f"expected one of {VALID_RADIUS_STYLES}"
+            )
+        if self.bkgrate_style not in VALID_BKGRATE_STYLES:
+            raise ValueError(
+                f"Invalid mask bkgrate_style {self.bkgrate_style!r}; "
+                f"expected one of {VALID_BKGRATE_STYLES}"
+            )
+        if not isinstance(self.nosrcellipse, bool):
+            raise TypeError(
+                f"Invalid mask nosrcellipse={self.nosrcellipse!r}; expected bool"
+            )
+        if not isinstance(self.expression, str):
+            raise TypeError(
+                f"Invalid mask expression={self.expression!r}; expected str"
+            )
+        for field_name, val in (
+            ("bkg_fraction", self.bkg_fraction),
+            ("bkgrate_user", self.bkgrate_user),
+            ("energy_fraction", self.energy_fraction),
+            ("fixed_radius", self.fixed_radius),
+        ):
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise TypeError(
+                    f"Invalid mask {field_name}={val!r}; "
+                    f"expected number, got {type(val).__name__}"
+                )
+        if not (math.isfinite(self.bkg_fraction) and self.bkg_fraction > 0.0):
+            raise ValueError(
+                f"Invalid mask bkg_fraction={self.bkg_fraction}; must be finite and > 0"
+            )
+        if not (math.isfinite(self.bkgrate_user) and self.bkgrate_user > 0.0):
+            raise ValueError(
+                f"Invalid mask bkgrate_user={self.bkgrate_user}; must be finite and > 0"
+            )
+        if not (
+            math.isfinite(self.energy_fraction) and 0.0 < self.energy_fraction < 1.0
+        ):
+            raise ValueError(
+                f"Invalid mask energy_fraction={self.energy_fraction}; "
+                "must be finite and strictly between 0 and 1"
+            )
+        if not (math.isfinite(self.fixed_radius) and self.fixed_radius > 0.0):
+            raise ValueError(
+                f"Invalid mask fixed_radius={self.fixed_radius}; must be finite and > 0"
+            )
+
+
+@dataclass
 class SpectrumRegionSpec:
     """One DS9 or SAS detector region entry for ``spectrum`` extraction."""
 
@@ -155,6 +223,7 @@ class SpectrumConfig:
     pattern_mos: int = 12
     pattern_pn: int = 4
     withsrcrem: bool = True
+    mask_dir: str = ""
     keepinterfiles: bool = True
     withplotfiles: bool = True
     mos1_ccds: str = "T T F T T F T"
@@ -266,6 +335,7 @@ class AnaConfig:
     qpb_image: QPBImageConfig = field(default_factory=QPBImageConfig)
     flare: FlareConfig = field(default_factory=FlareConfig)
     cheese: CheeseConfig = field(default_factory=CheeseConfig)
+    mask: MaskConfig = field(default_factory=MaskConfig)
     spectrum: SpectrumConfig = field(default_factory=SpectrumConfig)
     espfilt: InitVar[FlareConfig | None] = None
 

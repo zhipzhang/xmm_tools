@@ -17,6 +17,7 @@ from xmm_tools.config.schema import (
     CheeseConfig,
     FlareConfig,
     InstrumentsConfig,
+    MaskConfig,
     PathsConfig,
     QPBImageConfig,
     SpectrumConfig,
@@ -32,6 +33,45 @@ def _table(raw: Mapping[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(val, dict):
         raise TypeError(f"Expected [{key}] table in TOML config")
     return val
+
+
+def _require_str(
+    sec: Mapping[str, Any], key: str, default: str, *, section: str
+) -> str:
+    if key not in sec:
+        return default
+    val = sec[key]
+    if not isinstance(val, str):
+        raise TypeError(
+            f"Expected string for [{section}].{key}, got {type(val).__name__}"
+        )
+    return val
+
+
+def _require_bool(
+    sec: Mapping[str, Any], key: str, default: bool, *, section: str
+) -> bool:
+    if key not in sec:
+        return default
+    val = sec[key]
+    if not isinstance(val, bool):
+        raise TypeError(
+            f"Expected boolean for [{section}].{key}, got {type(val).__name__}"
+        )
+    return val
+
+
+def _require_float(
+    sec: Mapping[str, Any], key: str, default: float, *, section: str
+) -> float:
+    if key not in sec:
+        return default
+    val = sec[key]
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise TypeError(
+            f"Expected number for [{section}].{key}, got {type(val).__name__}"
+        )
+    return float(val)
 
 
 def _parse_regions(spec_sec: Mapping[str, Any]) -> list[SpectrumRegionSpec]:
@@ -161,6 +201,26 @@ def load_ana_config(path: str | Path) -> AnaConfig:
         extra_params=dict(ch_sec.get("extra_params", {})),
     )
 
+    mask_sec = _table(esas_sec, "mask")
+    mask_extra_raw = mask_sec.get("extra_params", {})
+    if not isinstance(mask_extra_raw, dict):
+        raise TypeError(
+            f"Expected table for [esas.mask].extra_params, got {type(mask_extra_raw).__name__}"
+        )
+    mask = MaskConfig(
+        radius_style=_require_str(mask_sec, "radius_style", "contour", section="esas.mask"),
+        bkg_fraction=_require_float(mask_sec, "bkg_fraction", 0.4, section="esas.mask"),
+        bkgrate_style=_require_str(mask_sec, "bkgrate_style", "col", section="esas.mask"),
+        bkgrate_user=_require_float(mask_sec, "bkgrate_user", 1.0, section="esas.mask"),
+        nosrcellipse=_require_bool(mask_sec, "nosrcellipse", False, section="esas.mask"),
+        energy_fraction=_require_float(
+            mask_sec, "energy_fraction", 0.85, section="esas.mask"
+        ),
+        fixed_radius=_require_float(mask_sec, "fixed_radius", 25.0, section="esas.mask"),
+        expression=_require_str(mask_sec, "expression", "", section="esas.mask"),
+        extra_params=dict(mask_extra_raw),
+    )
+
     spec_sec = _table(esas_sec, "spectrum")
     spectrum = SpectrumConfig(
         max_workers=int(spec_sec.get("max_workers", 2)),
@@ -169,6 +229,7 @@ def load_ana_config(path: str | Path) -> AnaConfig:
         pattern_mos=int(spec_sec.get("pattern_mos", 12)),
         pattern_pn=int(spec_sec.get("pattern_pn", 4)),
         withsrcrem=bool(spec_sec.get("withsrcrem", True)),
+        mask_dir=str(spec_sec.get("mask_dir", "")).strip(),
         keepinterfiles=bool(spec_sec.get("keepinterfiles", True)),
         withplotfiles=bool(spec_sec.get("withplotfiles", True)),
         mos1_ccds=str(spec_sec.get("mos1_ccds", "T T F T T F T")),
@@ -226,5 +287,6 @@ def load_ana_config(path: str | Path) -> AnaConfig:
         qpb_image=qpb_image,
         flare=flare,
         cheese=cheese,
+        mask=mask,
         spectrum=spectrum,
     )

@@ -305,39 +305,99 @@ def run_cheese(
     )
 
 
-def load_cheese_result(cfg: AnaConfig) -> CheeseResult:
-    """Load ``cheese`` outputs from ``manifest.json`` (or scan directory)."""
-    cheese_dir = normalize_lexical_path(cfg.paths.resolve(cfg.paths.cheese_dir))
+def _resolve_mask_dir(cfg: AnaConfig, mask_dir: str | Path | None) -> Path:
+    if mask_dir is not None and str(mask_dir).strip():
+        raw = Path(mask_dir)
+        if raw.is_absolute():
+            return normalize_lexical_path(raw)
+        ws_candidate = normalize_lexical_path(cfg.paths.resolve(raw))
+        cwd_candidate = normalize_lexical_path(raw)
+        if ws_candidate.is_dir():
+            return ws_candidate
+        if cwd_candidate.is_dir():
+            return cwd_candidate
+        return ws_candidate
+    return normalize_lexical_path(cfg.paths.resolve(cfg.paths.cheese_dir))
+
+
+def _scan_unique_mask_file(
+    target_dir: Path, inst_key: str, suffix: str
+) -> Path | None:
+    if not target_dir.is_dir():
+        return None
+    matches: list[Path] = []
+    for p in sorted(target_dir.glob(f"{inst_key}*{suffix}")):
+        if not is_nonempty_file(p):
+            continue
+        mid = p.name[len(inst_key) : -len(suffix)]
+        if mid[:1].isdigit():
+            continue
+        matches.append(p)
+    if len(matches) > 1:
+        names = ", ".join(m.name for m in matches)
+        raise ValueError(
+            f"Ambiguous mask files for {inst_key!r} (*{suffix}) in {target_dir}: {names}"
+        )
+    return matches[0] if matches else None
+
+
+def load_cheese_result(
+    cfg: AnaConfig,
+    *,
+    mask_dir: str | Path | None = None,
+) -> CheeseResult:
+    """Load ``cheese`` or ``mask`` outputs from ``manifest.json`` (or scan directory)."""
+    target_dir = _resolve_mask_dir(cfg, mask_dir)
     ws_root = normalize_lexical_path(cfg.paths.workdir)
-    manifest_path = cheese_dir / "manifest.json"
+    manifest_path = target_dir / "manifest.json"
     if manifest_path.is_file():
         return CheeseResult.from_manifest(
             manifest_path, workspace_root=ws_root, require_completed=True
         )
 
-    emllist = cheese_dir / "emllist.fits"
+    emllist = target_dir / "emllist.fits"
     cheese_masks: dict[str, Path] = {}
     region_det: dict[str, Path] = {}
     region_sky: dict[str, Path] = {}
 
-    flare = load_flare_result(cfg)
+    flare: FlareResult | None = None
+    try:
+        flare = load_flare_result(cfg)
+    except (FileNotFoundError, RuntimeError):
+        flare = None
+
+    if flare is not None:
+        for inst_key in ("mos1", "mos2", "pn"):
+            evt = flare.clean_events.get(inst_key)
+            if evt is None:
+                continue
+            prefix = strip_esas_suffix(evt)
+            mask = target_dir / f"{prefix}-cheeset.fits"
+            det = target_dir / f"{prefix}-bkgregtdet.fits"
+            sky = target_dir / f"{prefix}-bkgregtsky.fits"
+            if is_nonempty_file(mask):
+                cheese_masks[inst_key] = mask
+            if is_nonempty_file(det):
+                region_det[inst_key] = det
+            if is_nonempty_file(sky):
+                region_sky[inst_key] = sky
+
     for inst_key in ("mos1", "mos2", "pn"):
-        evt = flare.clean_events.get(inst_key)
-        if evt is None:
-            continue
-        prefix = strip_esas_suffix(evt)
-        mask = cheese_dir / f"{prefix}-cheeset.fits"
-        det = cheese_dir / f"{prefix}-bkgregtdet.fits"
-        sky = cheese_dir / f"{prefix}-bkgregtsky.fits"
-        if is_nonempty_file(mask):
-            cheese_masks[inst_key] = mask
-        if is_nonempty_file(det):
-            region_det[inst_key] = det
-        if is_nonempty_file(sky):
-            region_sky[inst_key] = sky
+        if inst_key not in cheese_masks:
+            found = _scan_unique_mask_file(target_dir, inst_key, "-cheeset.fits")
+            if found is not None:
+                cheese_masks[inst_key] = found
+        if inst_key not in region_det:
+            found = _scan_unique_mask_file(target_dir, inst_key, "-bkgregtdet.fits")
+            if found is not None:
+                region_det[inst_key] = found
+        if inst_key not in region_sky:
+            found = _scan_unique_mask_file(target_dir, inst_key, "-bkgregtsky.fits")
+            if found is not None:
+                region_sky[inst_key] = found
 
     return CheeseResult(
-        cheese_dir=cheese_dir,
+        cheese_dir=target_dir,
         manifest_path=manifest_path,
         method="cheese",
         emllist=emllist if is_nonempty_file(emllist) else None,

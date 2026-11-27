@@ -168,12 +168,17 @@ Every stage also remains available as its own subcommand:
 
    xmm-ana flare --config ana.toml
    xmm-ana cheese --config ana.toml
+   xmm-ana mask --config ana.toml --srclist merged_emllist.fits --out-dir mask_merged
    xmm-ana qpb-image --config ana.toml
    xmm-ana spectrum --config ana.toml
+   xmm-ana spectrum --config ana.toml --mask-dir mask_merged
 
    # Spectrum-specific incremental shortcuts:
    xmm-ana spectrum --only background --force
    xmm-ana spectrum --reg regions/new_knot.reg --name knot1 --mode single
+
+   # Run flare + spectrum directly against a custom mask directory (bypassing cheese):
+   xmm-ana run --config ana.toml --stages flare,spectrum --mask-dir mask_merged
 
 3. Complete Annotated ``ana.toml`` Example
 ------------------------------------------
@@ -289,6 +294,18 @@ section and parameter with its default value, unit, and purpose:
    keepinterfiles = false                # Let SAS clean up its own temporary files
    extra_params = {}                     # Extra key=value parameters passed through to `cheese`
 
+   # Optional Custom Mask Generation (`xmm-ana mask --srclist ... --out-dir ...`)
+   [esas.mask]
+   radius_style = "contour"              # "contour" (PSF flux contour) | "enfrac" (PSF EEF circle) | "userfixed" (fixed circle)
+   bkg_fraction = 0.4                    # [contour] Cutoff as fraction of local BG_MAP (smaller = larger holes)
+   bkgrate_style = "col"                 # [contour] "col" (read BG_MAP column) | "user" (constant bkgrate_user)
+   bkgrate_user = 1.0                    # [contour] Constant background (counts/pixel) when bkgrate_style = "user"
+   nosrcellipse = false                  # [contour] Force circles (radius = semi-major axis) instead of ellipses
+   energy_fraction = 0.85                # [enfrac] Fraction of PSF energy enclosed (0 < val < 1, larger = larger holes)
+   fixed_radius = 25.0                   # [userfixed] Constant exclusion circle radius (arcsec)
+   expression = ""                       # Optional SAS selectlib filter on SRCLIST (empty = use all rows)
+   extra_params = {}                     # Extra scalar key=value parameters passed through to SAS `region`
+
    # Stage 4: Per-Region Spectrum & QPB Extraction (`xmm-ana spectrum`)
    [esas.spectrum]
    max_workers = 2                       # Concurrent worker threads across independent regions
@@ -296,7 +313,8 @@ section and parameter with its default value, unit, and purpose:
    ehigh = 7200                          # Default upper energy bound for mosspectra/pnspectra (eV; SAS 22.1 range [2:11995])
    pattern_mos = 12                      # Event pattern threshold for MOS1 / MOS2
    pattern_pn = 4                        # Event pattern threshold for EPIC-pn
-   withsrcrem = true                     # Apply cheese point-source masks (requires `cheese` stage)
+   withsrcrem = true                     # Apply point-source masks (cheese or custom mask_dir)
+   # mask_dir = ""                       # Optional custom mask directory (e.g. from `xmm-ana mask`); "" = use paths.cheese_dir
    keepinterfiles = true                 # Keep intermediate spectra and exposure products
    withplotfiles = true                  # Generate QDP diagnostic plots in mosback/pnback
    mos1_ccds = "T T F T T F T"           # Active MOS1 CCDs (CCD3 & CCD6 disabled after micrometeoroid damage)
@@ -378,6 +396,35 @@ histograms with :doc:`gui_tools` (``xmm-qdp soft_proton_flare/mos1_evt-hist.qdp`
 If a detector has residual flares or overly aggressive clipping, adjust
 ``rangescale_mos``, ``rangescale_pn``, or ``allowsigma`` and re-run with
 ``--force``.
+
+``[esas.mask]`` & Custom Masking (``xmm-ana mask`` / ``--mask-dir``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When merging multi-epoch source catalogs (for example with ``xmm-srclist``) or
+curating an external ``emllist.fits``, use ``xmm-ana mask`` to generate
+per-instrument ``*-bkgregtdet.fits`` and ``*-bkgregtsky.fits`` exclusion masks
+via the SAS ``region`` task without overwriting ``[paths].cheese_dir``:
+
+.. code-block:: bash
+
+   # Generate custom masks using [esas.mask] defaults in ana.toml
+   xmm-ana mask --config ana.toml --srclist merged_emllist.fits --out-dir mask_merged
+
+   # Override radius style or thresholds directly on the CLI
+   xmm-ana mask --config ana.toml --srclist merged_emllist.fits --out-dir mask_eef \
+     --radius-style enfrac --energy-fraction 0.90
+
+   # Extract spectra using the custom mask directory
+   xmm-ana spectrum --config ana.toml --mask-dir mask_merged
+   xmm-ana run --config ana.toml --stages flare,spectrum --mask-dir mask_merged
+
+You can also persist the custom mask directory in ``ana.toml`` by setting
+``[esas.spectrum].mask_dir = "mask_merged"``; CLI ``--mask-dir`` takes
+precedence over ``ana.toml``, and an empty string falls back to
+``[paths].cheese_dir``. If ``srclist`` is a valid FITS table whose ``SRCLIST``
+extension contains ``0`` rows, ``xmm-ana mask`` writes valid empty ``REGION``
+tables instead of invoking SAS ``region`` (which would otherwise fail with
+``noSourcesSelected``).
 
 ``[[esas.spectrum.regions]]`` Extraction Modes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

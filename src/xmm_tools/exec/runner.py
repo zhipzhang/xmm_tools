@@ -81,6 +81,12 @@ def _translate_host_path(
         if norm.is_relative_to(host_dir):
             rel = norm.relative_to(host_dir)
             return (container_dir / rel).as_posix()
+    real_norm = Path(os.path.realpath(norm))
+    for host_dir, container_dir in mounts:
+        real_host = Path(os.path.realpath(host_dir))
+        if real_norm.is_relative_to(real_host):
+            rel = real_norm.relative_to(real_host)
+            return (container_dir / rel).as_posix()
     return str(raw_path)
 
 
