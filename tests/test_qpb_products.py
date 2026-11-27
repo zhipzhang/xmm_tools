@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
-from astropy.io import fits
 import numpy as np
+from astropy.io import fits
 
 from xmm_tools.sas import Image2D, QPBProducts
 from xmm_tools.sas.qpb_image import (

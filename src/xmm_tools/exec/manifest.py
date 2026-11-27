@@ -348,7 +348,7 @@ class StepLedger:
             algorithm_version=algorithm_version,
         )
 
-    def _write_checkpoint(
+    def _build_manifest(
         self,
         *,
         status: StageStatus,
@@ -362,7 +362,7 @@ class StepLedger:
             products = dict(self.previous.products)
         else:
             products = {}
-        manifest = StageManifest(
+        return StageManifest(
             stage=self.stage,
             status=status,
             schema_version=MANIFEST_SCHEMA_VERSION,
@@ -372,11 +372,25 @@ class StepLedger:
             products=products,
             error=error,
         )
+
+    def _write_checkpoint(
+        self,
+        *,
+        status: StageStatus,
+        error: str | None = None,
+    ) -> StageManifest:
+        manifest = self._build_manifest(status=status, error=error)
         atomic_write_json(
             self.manifest_path,
             manifest.to_dict(self.base_dir, workspace_root=self.workspace_root),
         )
         return manifest
+
+    def fail(self, error: str) -> StageManifest:
+        """Persist a failed checkpoint when stage validation fails outside ``run_step``."""
+        if self.dry_run:
+            return self._build_manifest(status="failed", error=error)
+        return self._write_checkpoint(status="failed", error=error)
 
     def _validate_outputs(
         self,
@@ -413,20 +427,25 @@ class StepLedger:
         resolved_inputs: dict[str, Path],
         require_outputs: bool,
         algorithm_version: str | None,
+        force: bool = False,
         dry_run_meta: Callable[[], dict[str, Any]],
         execute_fn: Callable[[], tuple[Mapping[str, Path], dict[str, Any]]],
         failure_meta_fn: Callable[[Exception, float], dict[str, Any]],
     ) -> CommandStepRecord:
-        reused = self._spec_matches_previous(
-            step_id,
-            program=program,
-            params=params,
-            cwd=cwd,
-            symlinks=symlinks,
-            expected_outputs=expected_outputs,
-            inputs=resolved_inputs,
-            require_outputs=require_outputs,
-            algorithm_version=algorithm_version,
+        reused = (
+            None
+            if force
+            else self._spec_matches_previous(
+                step_id,
+                program=program,
+                params=params,
+                cwd=cwd,
+                symlinks=symlinks,
+                expected_outputs=expected_outputs,
+                inputs=resolved_inputs,
+                require_outputs=require_outputs,
+                algorithm_version=algorithm_version,
+            )
         )
         if reused is not None:
             self.steps[step_id] = reused
@@ -532,6 +551,7 @@ class StepLedger:
         collect_outputs: Callable[[Path], Mapping[str, Path]] | None = None,
         require_outputs: bool = True,
         algorithm_version: str | None = None,
+        force: bool = False,
     ) -> CommandStepRecord:
         """Execute or reuse one ``SASCommand`` step and checkpoint the manifest."""
         spec = command.to_spec(
@@ -634,6 +654,7 @@ class StepLedger:
             resolved_inputs=resolved_inputs,
             require_outputs=require_outputs,
             algorithm_version=algorithm_version,
+            force=force,
             dry_run_meta=_dry_run_meta,
             execute_fn=_execute,
             failure_meta_fn=_failure_meta,

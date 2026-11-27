@@ -49,6 +49,7 @@ _DOCKER_PFILES_SCRIPT = (
     'else '
     'export PFILES="$tmp_pf"; '
     'fi; '
+    'export HEADASNOQUERY="${HEADASNOQUERY:-1}" HEADASPROMPT="${HEADASPROMPT:-/dev/null}"; '
     '"$@"'
 )
 

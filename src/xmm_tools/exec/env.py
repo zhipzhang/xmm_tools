@@ -131,6 +131,8 @@ class SASEnv:
             merged["PYTHONPATH"] = f"{rpath}:{existing_pp}" if existing_pp else rpath
         for k, v in self.extra_env.items():
             merged[k] = str(v)
+        merged.setdefault("HEADASNOQUERY", "1")
+        merged.setdefault("HEADASPROMPT", "/dev/null")
         return merged
 
     def validate(

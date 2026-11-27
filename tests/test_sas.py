@@ -73,6 +73,26 @@ regions_path = ""
         with self.assertRaises(ValueError):
             env.validate()
 
+    def test_headless_heasoft_defaults_and_overrides(self):
+        env = SASEnv()
+        merged = env.to_env_dict(base_env={"PATH": "/usr/bin"})
+        self.assertEqual(merged["HEADASNOQUERY"], "1")
+        self.assertEqual(merged["HEADASPROMPT"], "/dev/null")
+
+        # Explicit overrides in base_env or extra_env must be preserved
+        merged_base = env.to_env_dict(
+            base_env={"HEADASNOQUERY": "0", "HEADASPROMPT": "/dev/tty"}
+        )
+        self.assertEqual(merged_base["HEADASNOQUERY"], "0")
+        self.assertEqual(merged_base["HEADASPROMPT"], "/dev/tty")
+
+        override_env = SASEnv(
+            extra_env={"HEADASNOQUERY": "0", "HEADASPROMPT": "/custom/tty"}
+        )
+        merged_extra = override_env.to_env_dict(base_env={})
+        self.assertEqual(merged_extra["HEADASNOQUERY"], "0")
+        self.assertEqual(merged_extra["HEADASPROMPT"], "/custom/tty")
+
 
 class TestSASCommandAndRunner(unittest.TestCase):
     def test_command_argv_and_shell_rendering(self):
@@ -220,6 +240,9 @@ class TestSASCommandAndRunner(unittest.TestCase):
         self.assertIn("-lc", exec_argv)
         self.assertIn("--", exec_argv)
         self.assertEqual(exec_argv[-2:], ["espfilt", "elow=2500"])
+        script_idx = exec_argv.index("-lc") + 1
+        self.assertIn("HEADASNOQUERY", exec_argv[script_idx])
+        self.assertIn("HEADASPROMPT", exec_argv[script_idx])
 
     def test_docker_mounts_translate_cwd_and_env_vars(self):
         env = SASEnv(

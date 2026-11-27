@@ -267,6 +267,10 @@ class AnaConfig:
     def __post_init__(self, espfilt: FlareConfig | None) -> None:
         if espfilt is not None:
             self.flare = espfilt
+        if self.paths.qpb_image_dir == "qpb_image" and self.qpb_image.dir != "qpb_image":
+            self.paths.qpb_image_dir = self.qpb_image.dir
+        elif self.qpb_image.dir == "qpb_image" and self.paths.qpb_image_dir != "qpb_image":
+            self.qpb_image.dir = self.paths.qpb_image_dir
 
     @classmethod
     def from_toml(cls, path: str | Path) -> AnaConfig:
