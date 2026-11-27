@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from xmm_tools.config import AnaConfig, SpectrumRegionSpec
 from xmm_tools.esas.cheese import CheeseResult, run_cheese
 from xmm_tools.esas.flare import FlareResult, run_flare
 from xmm_tools.esas.spectrum import SpectrumResult, run_spectrum
-from xmm_tools.pipeline.config import AnaConfig, SpectrumRegionSpec
 from xmm_tools.pipeline.context import PipelineContext
 from xmm_tools.pipeline.stage import StageSpec
 from xmm_tools.sas.qpb_image import QPBImageResult, run_qpb_image
@@ -29,6 +29,7 @@ _STAGE_ALIASES: dict[str, str] = {
 
 def _build_stage_registry(
     *,
+    config: AnaConfig | None = None,
     regions: list[SpectrumRegionSpec] | None = None,
     only: list[str] | None = None,
 ) -> tuple[StageSpec, ...]:
@@ -37,6 +38,12 @@ def _build_stage_registry(
         if not target_specs and "spectrum" not in explicit:
             return "no [[esas.spectrum.regions]] configured in ana.toml"
         return None
+
+    spectrum_requires = (
+        ("flare", "cheese")
+        if (config is None or config.spectrum.withsrcrem)
+        else ("flare",)
+    )
 
     return (
         StageSpec(
@@ -73,7 +80,7 @@ def _build_stage_registry(
         ),
         StageSpec(
             name="spectrum",
-            requires=("flare", "cheese"),
+            requires=spectrum_requires,
             run=lambda ctx: run_spectrum(
                 ctx.config,
                 regions=regions,
@@ -166,6 +173,7 @@ class PipelineResult:
     config_path: Path
     stages_requested: list[str] = field(default_factory=list)
     stages_run: list[str] = field(default_factory=list)
+    stage_statuses: dict[str, str] = field(default_factory=dict)
     stages_skipped: dict[str, str] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)
 
@@ -216,7 +224,10 @@ def run_pipeline(
         force=force,
         docker_container=docker_container,
     )
-    registry = {spec.name: spec for spec in _build_stage_registry(regions=regions, only=only)}
+    registry = {
+        spec.name: spec
+        for spec in _build_stage_registry(config=cfg, regions=regions, only=only)
+    }
 
     result = PipelineResult(
         config_path=cfg_path,
@@ -230,8 +241,15 @@ def run_pipeline(
             if reason is not None:
                 result.stages_skipped[stage_name] = reason
                 continue
-        ctx.artifacts[stage_name] = spec.run(ctx)
+        artifact = spec.run(ctx)
+        ctx.artifacts[stage_name] = artifact
         result.stages_run.append(stage_name)
+        manifest = getattr(artifact, "manifest", None)
+        result.stage_statuses[stage_name] = (
+            manifest.status
+            if manifest is not None
+            else ("dry_run" if dry_run else "completed")
+        )
 
     result.artifacts = dict(ctx.artifacts)
     return result

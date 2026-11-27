@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 import time
@@ -120,7 +119,6 @@ class RunResult:
     returncode: int | None
     log_path: Path | None = None
     core_outputs: dict[str, Path] = field(default_factory=dict)
-    moved_intermediate: list[Path] = field(default_factory=list)
     elapsed_seconds: float = 0.0
     started_at: str = ""
     finished_at: str = ""
@@ -241,34 +239,6 @@ class SASRunner:
         )
         return docker_cmd
 
-    def _isolate_intermediate(
-        self, cmd: SASCommand, pre_existing: set[str]
-    ) -> list[Path]:
-        if not cmd.intermediate_dir:
-            return []
-
-        cwd = cmd.cwd_path
-        outputs = cmd.expected_outputs or cmd.core_outputs
-        keep = {Path(p).parts[0] for p in outputs}
-        keep.update(Path(k).parts[0] for k in cmd.symlinks)
-        keep.add(cmd.log_file)
-        keep.add(cmd.intermediate_dir)
-
-        dest_dir = cwd / cmd.intermediate_dir
-        moved: list[Path] = []
-        for entry in sorted(cwd.iterdir()):
-            if entry.name in pre_existing or entry.name in keep:
-                continue
-            if entry.is_dir():
-                continue
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            target = dest_dir / entry.name
-            if target.exists():
-                target.unlink()
-            shutil.move(str(entry), str(target))
-            moved.append(target)
-        return moved
-
     def run(self, cmd: SASCommand, *, force: bool = False) -> RunResult:
         """Execute ``cmd`` (or skip/dry-run according to runner settings)."""
         shell_str = cmd.to_shell(self.env)
@@ -302,7 +272,6 @@ class SASRunner:
         cwd.mkdir(parents=True, exist_ok=True)
         self._prepare_symlinks(cmd)
 
-        pre_existing = {p.name for p in cwd.iterdir()}
         log_path = cwd / cmd.log_file
         exec_argv = self._build_exec_argv(cmd)
         proc_env = None if self.docker_container else self.env.to_env_dict()
@@ -415,14 +384,12 @@ class SASRunner:
             )
             raise SASCommandError(err_msg, result=fail_res)
 
-        moved = self._isolate_intermediate(cmd, pre_existing)
         return RunResult(
             command=cmd,
             status="completed",
             returncode=0,
             log_path=log_path,
             core_outputs=resolved_outputs,
-            moved_intermediate=moved,
             elapsed_seconds=elapsed,
             started_at=started_at,
             finished_at=finished_at,

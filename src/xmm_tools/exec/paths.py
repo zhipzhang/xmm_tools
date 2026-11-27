@@ -165,6 +165,19 @@ def is_nonempty_file(path: Path | str) -> bool:
         return False
 
 
+def all_nonempty(paths: Mapping[str, Path | str]) -> bool:
+    """Return ``True`` when ``paths`` is non-empty and every entry is a non-empty file."""
+    return bool(paths) and all(is_nonempty_file(p) for p in paths.values())
+
+
+def read_log_tail(log_path: Path | str, limit: int = 1500) -> str:
+    """Return up to the last ``limit`` characters of ``log_path`` (or ``""``)."""
+    p = Path(log_path)
+    if limit <= 0 or not p.is_file():
+        return ""
+    return p.read_text(encoding="utf-8", errors="replace")[-limit:]
+
+
 def compute_sha256(path: Path | str) -> str:
     """Compute the SHA-256 hex digest of ``path`` (following symlinks)."""
     with Path(path).open("rb") as fh:

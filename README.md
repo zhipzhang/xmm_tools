@@ -27,12 +27,14 @@ pip install -e ".[dev,docs]"
 ## Quick Start
 
 ```bash
-# 1. One-time ODF initialization (generates ana.toml + standardized *_evt.fits)
+# 1. One-time ODF initialization (generates ana.toml, init_manifest.json, + standardized *_evt.fits)
+#    Automatically selects unique scheduled exposures (S\d{3}); pass --select INSTRUMENT=FILENAME to override
 xmm-ana init --odf-dir /path/to/ODF --workdir ./esas_work --ccfpath /ccf/valid
 cd esas_work
 
 # 2. Run all config-driven stages automatically (flare -> cheese -> qpb-image -> spectrum)
-#    (spectrum is skipped cleanly if [[esas.spectrum.regions]] is not configured yet)
+#    (spectrum is skipped cleanly if [[esas.spectrum.regions]] is not configured yet;
+#     unchanged steps are reused automatically via schema v2 manifest.json SHA-256 ledgers)
 xmm-ana run --config ana.toml
 
 # 3. Or run specific stages / a stage range:

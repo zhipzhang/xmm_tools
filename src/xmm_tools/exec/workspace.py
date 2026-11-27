@@ -12,16 +12,16 @@ from xmm_tools.exec.paths import (
     is_nonempty_file,
     normalize_lexical_path,
     publish_artifact,
+    read_log_tail,
     workspace_relative_path,
 )
 
-
-def read_log_tail(log_path: Path | str, limit: int = 1500) -> str:
-    """Return up to the last ``limit`` characters of ``log_path`` (or ``""``)."""
-    p = Path(log_path)
-    if limit <= 0 or not p.is_file():
-        return ""
-    return p.read_text(encoding="utf-8", errors="replace")[-limit:]
+__all__ = [
+    "StageWorkspace",
+    "check_log_markers",
+    "find_unique_file",
+    "read_log_tail",
+]
 
 
 def check_log_markers(

@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
 import json
-from pathlib import Path
 import sys
+from dataclasses import dataclass, field
+from pathlib import Path
 
-from astropy.coordinates import SkyCoord
 import astropy.units as u
+import numpy as np
+from astropy.coordinates import SkyCoord
 from imgui_bundle import (
-    immapp,
     imgui,
+    immapp,
     implot,
+)
+from imgui_bundle import (
     portable_file_dialogs as pfd,
 )
-import numpy as np
 
 from xmm_tools.image.fits_io import (
     FitsImageData,
@@ -42,7 +44,6 @@ from xmm_tools.image.regions import (
     resize_box_edge,
     strip_params_from_sky_points,
 )
-
 
 _DEFAULT_RECENT_FITS_PATH = Path.home() / ".config" / "xmm_tools" / "recent_fits.json"
 _MAX_RECENT_FILES = 10

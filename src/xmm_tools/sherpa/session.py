@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from xmm_tools.sherpa.components import (
     VALID_SCOPES,
@@ -22,7 +23,7 @@ def _require_sherpa_fit() -> dict[str, Any]:
         from sherpa.fit import Fit
         from sherpa.models.model import SimulFitModel
         from sherpa.optmethods import LevMar, NelderMead
-        from sherpa.stats import CStat, Chi2Gehrels, Chi2XspecVar, WStat
+        from sherpa.stats import Chi2Gehrels, Chi2XspecVar, CStat, WStat
     except ImportError as exc:
         raise ImportError(
             "Sherpa fitting modules are required for JointFitSession."
@@ -116,13 +117,15 @@ class FitReport:
     ) -> str:
         """Return a concise human-readable table of fitted parameters."""
         lines = [
-            f"Fit Summary: {self.stat_name} = {self.stat_val:.3f} / {self.dof} dof "
-            f"(reduced = {self.reduced_stat:.4f}, succeeded = {self.succeeded})",
+            (
+                f"Fit Summary: {self.stat_name} = {self.stat_val:.3f} / {self.dof} dof "
+                f"(reduced = {self.reduced_stat:.4f}, succeeded = {self.succeeded})"
+            ),
             "-" * 78,
         ]
         seen: set[str] = set()
-        for ds_id, ds_comps in self.components.items():
-            for cname, plist in ds_comps.items():
+        for ds_comps in self.components.values():
+            for plist in ds_comps.values():
                 for p in plist:
                     fname = p["fullname"]
                     if fname in seen:

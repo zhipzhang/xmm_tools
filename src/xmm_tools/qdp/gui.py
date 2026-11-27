@@ -3,20 +3,29 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
 import json
-from pathlib import Path
 import sys
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from imgui_bundle import (
-    immapp,
     imgui,
+    immapp,
     implot,
+)
+from imgui_bundle import (
     portable_file_dialogs as pfd,
 )
-import numpy as np
 
-from xmm_tools.qdp.parser import QDPData, QDPSeries, QDPWindow, load_qdp
+from xmm_tools.qdp.parser import (
+    QDPData,
+    QDPSeries,
+    QDPWindow,
+    load_qdp,
+)
+from xmm_tools.qdp.parser import (
+    filter_series_arrays as _filter_series_arrays,
+)
 
 
 @dataclass
@@ -122,39 +131,6 @@ class QDPViewerState:
             w.window_id: WindowViewState(log_x=w.log_x, log_y=w.log_y)
             for w in loaded.windows
         }
-
-
-def _filter_series_arrays(
-    series: QDPSeries,
-    *,
-    hide_minus_one: bool,
-    log_x: bool,
-    log_y: bool,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
-    """Return contiguous float64 arrays filtered for NaN/Inf, sentinel -1, and log<=0."""
-    mask = np.isfinite(series.x) & np.isfinite(series.y)
-    if hide_minus_one:
-        mask &= series.y != -1.0
-    if log_x:
-        mask &= series.x > 0.0
-    if log_y:
-        mask &= series.y > 0.0
-
-    xs = np.ascontiguousarray(series.x[mask], dtype=np.float64)
-    ys = np.ascontiguousarray(series.y[mask], dtype=np.float64)
-
-    yerr_lo: np.ndarray | None = None
-    yerr_hi: np.ndarray | None = None
-    if series.yerr_low is not None and series.yerr_high is not None:
-        lo = np.where(np.isfinite(series.yerr_low[mask]), series.yerr_low[mask], 0.0)
-        hi = np.where(np.isfinite(series.yerr_high[mask]), series.yerr_high[mask], 0.0)
-        if log_y:
-            # Clamp lower error so y - err_lo stays strictly positive on log10 plots
-            lo = np.minimum(lo, ys * 0.999)
-        yerr_lo = np.ascontiguousarray(np.maximum(lo, 0.0), dtype=np.float64)
-        yerr_hi = np.ascontiguousarray(np.maximum(hi, 0.0), dtype=np.float64)
-
-    return xs, ys, yerr_lo, yerr_hi
 
 
 def _draw_toolbar(state: QDPViewerState) -> None:
@@ -265,11 +241,10 @@ def _draw_sidebar(state: QDPViewerState) -> None:
                             f"Err##err_{win.window_id}_{y_idx}", sstate.show_errors
                         )
 
-    if any(w.labels for w in data.windows):
-        if imgui.collapsing_header("Annotations"):
-            for win in data.windows:
-                for lbl in win.labels:
-                    imgui.text_wrapped(f"[W{win.window_id}] {lbl.text}")
+    if any(w.labels for w in data.windows) and imgui.collapsing_header("Annotations"):
+        for win in data.windows:
+            for lbl in win.labels:
+                imgui.text_wrapped(f"[W{win.window_id}] {lbl.text}")
 
     if data.commands and imgui.collapsing_header(
         f"QDP Commands ({len(data.commands)})"

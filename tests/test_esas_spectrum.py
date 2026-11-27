@@ -648,3 +648,48 @@ class TestESASSpectrum(unittest.TestCase):
             self.assertEqual(failed.manifest.status, "failed")
             self.assertIn("r1", failed.regions)
             self.assertFalse(failed.regions["r1"].active)
+
+    def test_unmatched_only_raises_and_preserves_manifests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg, flare, mask_res = self._setup_workspace(root)
+            reg1 = root / "r1.reg"
+            reg1.write_text("fk5\ncircle(287.95,4.98,60\")\n", encoding="utf-8")
+            cfg.spectrum.regions = [
+                SpectrumRegionSpec(name="r1", file=str(reg1), mode="single")
+            ]
+
+            sdir = cfg.paths.resolve(cfg.paths.spectrum_dir)
+            manifest_path = sdir / "manifest.json"
+            self.assertFalse(manifest_path.exists())
+
+            # 1. Fresh workspace: raises ValueError and does not create spectrum/manifest.json
+            with self.assertRaises(ValueError) as ctx:
+                run_spectrum(
+                    cfg,
+                    flare=flare,
+                    mask_res=mask_res,
+                    only=["nonexistent_typo"],
+                )
+            self.assertIn("nonexistent_typo", str(ctx.exception))
+            self.assertFalse(manifest_path.exists())
+            self.assertFalse(sdir.exists())
+
+            # 2. Existing valid manifest on disk: raises ValueError and leaves it unmodified
+            calls: list[tuple[str, Path, dict]] = []
+            with patch(
+                "xmm_tools.exec.runner.SASRunner.run",
+                new=self._fake_runner_factory(calls),
+            ):
+                res = run_spectrum(cfg, flare=flare, mask_res=mask_res)
+            self.assertTrue(res.manifest_path.is_file())
+            before_text = res.manifest_path.read_text(encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                run_spectrum(
+                    cfg,
+                    flare=flare,
+                    mask_res=mask_res,
+                    only=["nonexistent_typo"],
+                )
+            self.assertEqual(res.manifest_path.read_text(encoding="utf-8"), before_text)

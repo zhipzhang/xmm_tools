@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from xmm_tools.config import AnaConfig
 from xmm_tools.exec.runner import SASRunner
-from xmm_tools.pipeline.config import AnaConfig
 
 
 @dataclass
@@ -19,12 +19,11 @@ class PipelineContext:
     docker_container: str | None = None
     artifacts: dict[str, Any] = field(default_factory=dict)
 
-    def make_runner(self, *, skip_if_exists: bool | None = None) -> SASRunner:
+    def make_runner(self, *, skip_if_exists: bool = False) -> SASRunner:
         """Create a configured ``SASRunner`` for a stage."""
-        skip = (not self.force) if skip_if_exists is None else skip_if_exists
         return SASRunner(
             env=self.config.env,
             dry_run=self.dry_run,
-            skip_if_exists=skip,
+            skip_if_exists=skip_if_exists,
             docker_container=self.docker_container,
         )

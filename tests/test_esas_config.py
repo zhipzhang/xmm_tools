@@ -21,6 +21,10 @@ from xmm_tools.sas import (
     select_chain_exposures,
     standardize_event_files,
 )
+from xmm_tools.sas.odf import (
+    _compute_ccfpath_fingerprint,
+    _compute_odf_fingerprint,
+)
 
 
 class TestESASConfig(unittest.TestCase):
@@ -389,6 +393,156 @@ class TestESASInit(unittest.TestCase):
             seen_cmds.clear()
             with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
                 initialize_observation(odf_dir, work_dir, sas_ccfpath="/ccf/valid_v2")
+            self.assertEqual(
+                seen_cmds, ["cifbuild", "odfingest", "emchain", "epchain", "epchain"]
+            )
+
+    def test_same_basename_ccfpath_and_summaryless_odf_invalidate_and_stay_mount_portable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work_dir = root / "esas_work"
+
+            odf1 = root / "obs1" / "ODF"
+            odf2 = root / "obs2" / "ODF"
+            odf1.mkdir(parents=True)
+            odf2.mkdir(parents=True)
+
+            ccf_a = root / "ccf_a" / "valid"
+            ccf_b = root / "ccf_b" / "valid"
+            ccf_a.mkdir(parents=True)
+            ccf_b.mkdir(parents=True)
+
+            seen_cmds: list[str] = []
+            run_counter = {"n": 0}
+
+            def fake_run(self, cmd, *, force=False):
+                seen_cmds.append(cmd.program)
+                cmd.cwd_path.mkdir(parents=True, exist_ok=True)
+                tag = run_counter["n"]
+                if cmd.program == "cifbuild":
+                    (cmd.cwd_path / "ccf.cif").write_text(f"ccf_{tag}", encoding="utf-8")
+                elif cmd.program == "odfingest":
+                    (cmd.cwd_path / "1234_0204870101_SCX00000SUM.SAS").write_text(
+                        f"sum_{tag}", encoding="utf-8"
+                    )
+                elif cmd.program == "emchain":
+                    (cmd.cwd_path / "P0204870101M1S001MIEVLI0000.FIT").write_text(
+                        f"m1_{tag}", encoding="utf-8"
+                    )
+                return RunResult(command=cmd, status="completed", returncode=0)
+
+            # 1. Empty directories with identical basename ("ODF" and "valid")
+            run_counter["n"] += 1
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                initialize_observation(odf1, work_dir, sas_ccfpath=ccf_a)
+            self.assertEqual(
+                seen_cmds, ["cifbuild", "odfingest", "emchain", "epchain", "epchain"]
+            )
+
+            seen_cmds.clear()
+            run_counter["n"] += 1
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                initialize_observation(odf1, work_dir, sas_ccfpath=ccf_b)
+            self.assertEqual(
+                seen_cmds, ["cifbuild", "odfingest", "emchain", "epchain", "epchain"]
+            )
+
+            seen_cmds.clear()
+            run_counter["n"] += 1
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                initialize_observation(odf2, work_dir, sas_ccfpath=ccf_b)
+            self.assertEqual(
+                seen_cmds, ["cifbuild", "odfingest", "emchain", "epchain", "epchain"]
+            )
+
+            # 2. Populated directories with identical basenames and different files
+            (odf1 / "0001_0001_OBX.FIT").write_bytes(b"odf_one")
+            (odf2 / "0001_0001_OBX.FIT").write_bytes(b"odf_two")
+            (ccf_a / "EMOS1_LINCOORD_0019.CCF").write_bytes(b"ccf_alpha")
+            (ccf_b / "EMOS1_LINCOORD_0019.CCF").write_bytes(b"ccf_beta")
+            # Large file (> 64 KiB) differing only near tail
+            (ccf_a / "LARGE_CAL.CCF").write_bytes(b"A" * 70000 + b"TAIL_1")
+            (ccf_b / "LARGE_CAL.CCF").write_bytes(b"A" * 70000 + b"TAIL_2")
+
+            seen_cmds.clear()
+            run_counter["n"] += 1
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                initialize_observation(odf1, work_dir, sas_ccfpath=ccf_a)
+            self.assertEqual(
+                seen_cmds, ["cifbuild", "odfingest", "emchain", "epchain", "epchain"]
+            )
+
+            seen_cmds.clear()
+            run_counter["n"] += 1
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                initialize_observation(odf1, work_dir, sas_ccfpath=ccf_b)
+            self.assertEqual(
+                seen_cmds, ["cifbuild", "odfingest", "emchain", "epchain", "epchain"]
+            )
+
+            seen_cmds.clear()
+            run_counter["n"] += 1
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                initialize_observation(odf2, work_dir, sas_ccfpath=ccf_b)
+            self.assertEqual(
+                seen_cmds, ["cifbuild", "odfingest", "emchain", "epchain", "epchain"]
+            )
+
+            # 3. Host <-> Docker portability: same calibration files under mounted path
+            host_fp = _compute_ccfpath_fingerprint(ccf_a, workspace_root=work_dir)
+            container_fp = _compute_ccfpath_fingerprint(
+                "/container_mount/ccf/valid",
+                workspace_root=work_dir,
+                mounts=[(str(root / "ccf_a"), "/container_mount/ccf")],
+            )
+            self.assertEqual(host_fp, container_fp)
+            self.assertTrue(host_fp.startswith("ccf:"))
+
+            odf_host_fp = _compute_odf_fingerprint(odf1, workspace_root=work_dir)
+            odf_container_fp = _compute_odf_fingerprint(
+                Path("/container_odf/ODF"),
+                workspace_root=work_dir,
+                mounts=[(str(odf1), "/container_odf/ODF")],
+            )
+            self.assertEqual(odf_host_fp, odf_container_fp)
+            self.assertTrue(odf_host_fp.startswith("files:"))
+
+            # 4. Large file (> 64 KiB) differing ONLY in the middle (identical head, tail, name, size)
+            mid_head = b"H" * 35000
+            mid_tail = b"T" * (80_000 - 35008)
+            mid_payload_1 = mid_head + b"MIDDLE_1" + mid_tail
+            mid_payload_2 = mid_head + b"MIDDLE_2" + mid_tail
+            self.assertEqual(len(mid_payload_1), 80_000)
+            self.assertEqual(len(mid_payload_2), 80_000)
+            self.assertEqual(mid_payload_1[:16384], mid_payload_2[:16384])
+            self.assertEqual(mid_payload_1[-16384:], mid_payload_2[-16384:])
+
+            ccf_mid = root / "ccf_mid" / "valid"
+            ccf_mid.mkdir(parents=True)
+            (ccf_mid / "MID_CAL.CCF").write_bytes(mid_payload_1)
+
+            fp_mid_1 = _compute_ccfpath_fingerprint(ccf_mid, workspace_root=work_dir)
+            seen_cmds.clear()
+            run_counter["n"] += 1
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                initialize_observation(odf2, work_dir, sas_ccfpath=ccf_mid)
+            self.assertEqual(
+                seen_cmds, ["cifbuild", "odfingest", "emchain", "epchain", "epchain"]
+            )
+
+            seen_cmds.clear()
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                initialize_observation(odf2, work_dir, sas_ccfpath=ccf_mid)
+            self.assertEqual(seen_cmds, [])
+
+            (ccf_mid / "MID_CAL.CCF").write_bytes(mid_payload_2)
+            fp_mid_2 = _compute_ccfpath_fingerprint(ccf_mid, workspace_root=work_dir)
+            self.assertNotEqual(fp_mid_1, fp_mid_2)
+
+            seen_cmds.clear()
+            run_counter["n"] += 1
+            with patch("xmm_tools.exec.runner.SASRunner.run", new=fake_run):
+                initialize_observation(odf2, work_dir, sas_ccfpath=ccf_mid)
             self.assertEqual(
                 seen_cmds, ["cifbuild", "odfingest", "emchain", "epchain", "epchain"]
             )

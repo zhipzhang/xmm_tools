@@ -5,6 +5,7 @@ from xmm_tools.qdp.parser import (
     QDPLabel,
     QDPSeries,
     QDPWindow,
+    filter_series_arrays,
     load_qdp,
     parse_qdp_text,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "QDPLabel",
     "QDPSeries",
     "QDPWindow",
+    "filter_series_arrays",
     "load_qdp",
     "parse_qdp_text",
 ]

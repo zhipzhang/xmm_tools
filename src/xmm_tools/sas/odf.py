@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from xmm_tools.exec import (
     publish_artifact,
     read_json,
     resolve_workspace_path,
+    workspace_relative_path,
 )
 
 STANDARD_EVENT_SPECS: tuple[tuple[str, str, str], ...] = (
@@ -215,24 +217,131 @@ def standardize_event_files(
     return resolved
 
 
-def _compute_odf_fingerprint(odf_path: Path) -> str:
-    """Compute a mount-independent fingerprint from raw ODF summary files."""
-    summary_files = [
-        p
-        for p in (
-            sorted(odf_path.glob("*SUM.ASC")) + sorted(odf_path.glob("*SUMMRY.ASC"))
+def _fingerprint_directory_files(dir_path: Path) -> str | None:
+    """Compute a deterministic content/metadata fingerprint for regular files in ``dir_path``."""
+    if not dir_path.is_dir():
+        return None
+    with os.scandir(dir_path) as it:
+        entries = sorted(
+            (entry for entry in it if entry.is_file(follow_symlinks=True)),
+            key=lambda entry: entry.name,
         )
-        if is_nonempty_file(p)
-    ]
-    if not summary_files:
-        return odf_path.name
+    if not entries:
+        return None
+
     digest = hashlib.sha256()
-    for f in summary_files:
-        digest.update(f.name.encode("utf-8"))
+    for entry in entries:
+        size = entry.stat(follow_symlinks=True).st_size
+        digest.update(entry.name.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(compute_sha256(f).encode("ascii"))
+        digest.update(str(size).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(compute_sha256(Path(entry.path)).encode("ascii"))
         digest.update(b"\n")
-    return digest.hexdigest()
+    return f"files:{digest.hexdigest()}"
+
+
+def _resolve_local_or_mounted_dir(
+    raw_path: Path,
+    mounts: Sequence[tuple[Path | str, Path | str]],
+) -> Path:
+    """Resolve ``raw_path`` locally, falling back to reverse Docker mount lookup."""
+    if raw_path.exists() or not mounts:
+        return raw_path
+    expanded = Path(os.path.expanduser(str(raw_path)))
+    if not expanded.is_absolute():
+        return raw_path
+    norm = normalize_lexical_path(expanded)
+    sorted_mounts = sorted(
+        (
+            (
+                normalize_lexical_path(host_src),
+                normalize_lexical_path(container_dst),
+            )
+            for host_src, container_dst in mounts
+        ),
+        key=lambda pair: (len(pair[1].parts), len(pair[1].as_posix())),
+        reverse=True,
+    )
+    for host_dir, container_dir in sorted_mounts:
+        if norm.is_relative_to(container_dir):
+            rel = norm.relative_to(container_dir)
+            candidate = host_dir / rel
+            if candidate.exists():
+                return candidate
+    return raw_path
+
+
+def _compute_odf_fingerprint(
+    odf_path: Path,
+    *,
+    workspace_root: Path,
+    mounts: Sequence[tuple[Path | str, Path | str]] = (),
+) -> str:
+    """Compute a mount-independent fingerprint for an ODF directory."""
+    local_odf = _resolve_local_or_mounted_dir(odf_path, mounts)
+    if local_odf.is_dir():
+        summary_files = [
+            p
+            for p in (
+                sorted(local_odf.glob("*SUM.ASC"))
+                + sorted(local_odf.glob("*SUMMRY.ASC"))
+            )
+            if is_nonempty_file(p)
+        ]
+        if summary_files:
+            digest = hashlib.sha256()
+            for f in summary_files:
+                digest.update(f.name.encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(compute_sha256(f).encode("ascii"))
+                digest.update(b"\n")
+            return f"sum:{digest.hexdigest()}"
+
+    files_fp = _fingerprint_directory_files(local_odf)
+    if files_fp is not None:
+        return files_fp
+
+    rel_path = workspace_relative_path(
+        resolve_workspace_path(workspace_root, odf_path),
+        workspace_root,
+        workspace_root=workspace_root,
+    )
+    path_digest = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()
+    return f"path:{path_digest}"
+
+
+def _compute_ccfpath_fingerprint(
+    sas_ccfpath: str | Path,
+    *,
+    workspace_root: Path,
+    mounts: Sequence[tuple[Path | str, Path | str]] = (),
+) -> str:
+    """Compute a portable content/path fingerprint for ``SAS_CCFPATH``."""
+    segments = [seg for seg in str(sas_ccfpath).split(":") if seg]
+    if not segments:
+        return "empty"
+
+    tokens: list[str] = []
+    for seg in segments:
+        seg_path = Path(seg)
+        local_seg = _resolve_local_or_mounted_dir(seg_path, mounts)
+        tok = _fingerprint_directory_files(local_seg)
+        if tok is None:
+            rel_seg = workspace_relative_path(
+                resolve_workspace_path(workspace_root, seg_path),
+                workspace_root,
+                workspace_root=workspace_root,
+            )
+            seg_digest = hashlib.sha256(rel_seg.encode("utf-8")).hexdigest()
+            tok = f"path:{seg_digest}"
+        tokens.append(tok)
+
+    digest = hashlib.sha256()
+    for tok in tokens:
+        digest.update(tok.encode("utf-8"))
+        digest.update(b"\n")
+    return f"ccf:{digest.hexdigest()}"
 
 
 def discover_odf_summary(
@@ -317,16 +426,21 @@ def initialize_observation(
         force=force,
     )
 
-    odf_fingerprint = _compute_odf_fingerprint(odf_path)
-    init_algo_version = f"odf:{odf_fingerprint}|ccfpath:{Path(str(sas_ccfpath)).name}"
-
-    # 1. cifbuild
+    # 1. cifbuild (construct ccf_runner first so Docker mount mapping is available)
     ccf_runner = SASRunner(
         env=SASEnv(sas_ccfpath=str(sas_ccfpath), sas_odf=str(odf_path)),
         dry_run=dry_run,
         skip_if_exists=False,
         docker_container=docker_container,
     )
+    mounts = ccf_runner._resolve_docker_mounts() if docker_container else ()
+    odf_fingerprint = _compute_odf_fingerprint(
+        odf_path, workspace_root=work_path, mounts=mounts
+    )
+    ccf_fingerprint = _compute_ccfpath_fingerprint(
+        sas_ccfpath, workspace_root=work_path, mounts=mounts
+    )
+    init_algo_version = f"odf:{odf_fingerprint}|ccfpath:{ccf_fingerprint}"
     ccf_cmd = SASCommand(
         program="cifbuild",
         cwd=work_path,

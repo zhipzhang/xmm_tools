@@ -55,9 +55,8 @@ class SASCommand:
     symlinks: dict[str, Path | str] = field(default_factory=dict)
     expected_outputs: list[str] = field(default_factory=list)
     log_file: str = "execution.log"
-    # Transitional compatibility fields used by Stages 2-3 until Stage 4 cleanup.
+    # Backward-compatible InitVar alias for expected_outputs.
     core_outputs: InitVar[list[str] | None] = None
-    intermediate_dir: str | None = None
 
     def __post_init__(self, core_outputs: list[str] | None) -> None:
         if core_outputs and not self.expected_outputs:

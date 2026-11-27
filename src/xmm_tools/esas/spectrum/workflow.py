@@ -157,6 +157,21 @@ def run_spectrum(
         )
 
     sdir = normalize_lexical_path(cfg.paths.resolve(cfg.paths.spectrum_dir))
+    all_jobs = expand_region_specs(target_specs, cfg, sdir)
+    if only:
+        only_set = {item for item in only if item}
+        expanded_jobs = [
+            j for j in all_jobs if j.group in only_set or j.key in only_set
+        ]
+        if not expanded_jobs:
+            available = sorted({j.group for j in all_jobs} | {j.key for j in all_jobs})
+            raise ValueError(
+                f"--only filter {sorted(only_set)!r} matched no spectrum regions; "
+                f"available groups/keys: {available}"
+            )
+    else:
+        expanded_jobs = all_jobs
+
     ws = StageWorkspace(
         workspace_root=normalize_lexical_path(cfg.paths.workdir),
         stage_dir=sdir,
@@ -174,13 +189,6 @@ def run_spectrum(
             workspace_root=ws.workspace_root,
         )
     )
-
-    expanded_jobs = expand_region_specs(target_specs, cfg, sdir)
-    if only:
-        only_set = set(only)
-        expanded_jobs = [
-            j for j in expanded_jobs if j.group in only_set or j.key in only_set
-        ]
 
     flare_res = flare if flare is not None else load_flare_result(cfg)
     if mask_res is None and spec_cfg.withsrcrem:

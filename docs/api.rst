@@ -1,8 +1,12 @@
 API Reference
 =============
 
-Execution Engine
-----------------
+Execution, Workspace & Manifest Layer
+-------------------------------------
+
+.. automodule:: xmm_tools.exec.paths
+   :members:
+   :undoc-members:
 
 .. automodule:: xmm_tools.exec.env
    :members:
@@ -16,12 +20,31 @@ Execution Engine
    :members:
    :undoc-members:
 
-Pipeline & Configuration
-------------------------
-
-.. automodule:: xmm_tools.pipeline.config
+.. automodule:: xmm_tools.exec.workspace
    :members:
    :undoc-members:
+
+.. automodule:: xmm_tools.exec.manifest
+   :members:
+   :undoc-members:
+
+Configuration Layer
+-------------------
+
+.. automodule:: xmm_tools.config.schema
+   :members:
+   :undoc-members:
+
+.. automodule:: xmm_tools.config.loader
+   :members:
+   :undoc-members:
+
+.. automodule:: xmm_tools.config.template
+   :members:
+   :undoc-members:
+
+Pipeline Orchestration & CLI
+----------------------------
 
 .. automodule:: xmm_tools.pipeline.context
    :members:
@@ -46,16 +69,24 @@ SAS Tasks & QPB Products
    :members:
    :undoc-members:
 
-.. automodule:: xmm_tools.sas.qpb_image
+.. automodule:: xmm_tools.sas.qpb_image.models
    :members:
    :undoc-members:
 
-.. automodule:: xmm_tools.sas.qpb_products
+.. automodule:: xmm_tools.sas.qpb_image.products
+   :members:
+   :undoc-members:
+
+.. automodule:: xmm_tools.sas.qpb_image.workflow
    :members:
    :undoc-members:
 
 ESAS Tasks
 ----------
+
+.. automodule:: xmm_tools.esas.naming
+   :members:
+   :undoc-members:
 
 .. automodule:: xmm_tools.esas.flare
    :members:
@@ -65,7 +96,15 @@ ESAS Tasks
    :members:
    :undoc-members:
 
-.. automodule:: xmm_tools.esas.spectrum
+.. automodule:: xmm_tools.esas.spectrum.models
+   :members:
+   :undoc-members:
+
+.. automodule:: xmm_tools.esas.spectrum.regions
+   :members:
+   :undoc-members:
+
+.. automodule:: xmm_tools.esas.spectrum.workflow
    :members:
    :undoc-members:
 

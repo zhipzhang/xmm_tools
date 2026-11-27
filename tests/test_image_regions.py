@@ -1,14 +1,14 @@
 """Tests for FITS image loading, smoothing, strip-grid regions, and GUI state."""
 
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
+import astropy.units as u
+import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
-import astropy.units as u
 from astropy.wcs import WCS
-import numpy as np
 
 from xmm_tools.image import (
     CircleRegion,
@@ -29,7 +29,13 @@ from xmm_tools.image import (
     stretch_image,
     strip_params_from_sky_points,
 )
-from xmm_tools.image.gui import ImageViewerState
+
+try:
+    from xmm_tools.image.gui import ImageViewerState
+except ModuleNotFoundError as exc:
+    if exc.name != "imgui_bundle" and not (exc.name or "").startswith("imgui_bundle."):
+        raise
+    ImageViewerState = None  # type: ignore[assignment,misc]
 
 
 def _write_test_fits(path: Path, ny: int = 64, nx: int = 64) -> Path:
@@ -135,6 +141,7 @@ class TestFitsImageAndRegions(unittest.TestCase):
             self.assertEqual(len(ellipse_outline_pixels(parsed[5], img)), 48)
             self.assertEqual(len(polygon_pixels(parsed[6], img)), 3)
 
+    @unittest.skipIf(ImageViewerState is None, "imgui_bundle not installed")
     def test_viewer_state_load_and_apply_strip(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

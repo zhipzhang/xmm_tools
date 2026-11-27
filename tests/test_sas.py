@@ -117,7 +117,7 @@ class TestSASCommandAndRunner(unittest.TestCase):
         self.assertIn("ln -sfn ../soft_proton_flare/mos1S001-allevc.fits mos1S001-allevc.fits", shell)
         self.assertIn("'elowlist=350 2500'", shell)
 
-    def test_runner_executes_isolates_intermediate_and_skips(self):
+    def test_runner_executes_and_skips(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             src_dir = root / "src"
@@ -130,15 +130,13 @@ class TestSASCommandAndRunner(unittest.TestCase):
             script = (
                 "from pathlib import Path; "
                 "Path('core.fits').write_text('core_data'); "
-                "Path('junk1.tmp').write_text('temp1'); "
-                "Path('junk2.tmp').write_text('temp2'); "
                 "print('SAS_CCF=' + __import__('os').environ.get('SAS_CCF', ''))"
             )
             cmd = SASCommand(
                 program=sys.executable,
                 cwd=work_dir,
                 params={"-c": None},  # overridden below via subclass/helper test
-                core_outputs=["core.fits"],
+                expected_outputs=["core.fits"],
                 symlinks={"linked.fits": input_file},
             )
             # Test dry_run first
@@ -156,9 +154,8 @@ class TestSASCommandAndRunner(unittest.TestCase):
             real_cmd = _InlineCmd(
                 program="mock_sas",
                 cwd=work_dir,
-                core_outputs=["core.fits"],
+                expected_outputs=["core.fits"],
                 symlinks={"linked.fits": input_file},
-                intermediate_dir="_intermediate",
             )
             runner = SASRunner(env=env, skip_if_exists=True)
             res = runner.run(real_cmd)
@@ -166,9 +163,6 @@ class TestSASCommandAndRunner(unittest.TestCase):
             self.assertTrue((work_dir / "core.fits").exists())
             self.assertTrue((work_dir / "linked.fits").is_symlink())
             self.assertFalse(Path(os.readlink(work_dir / "linked.fits")).is_absolute())
-            self.assertFalse((work_dir / "junk1.tmp").exists())
-            self.assertTrue((work_dir / "_intermediate" / "junk1.tmp").exists())
-            self.assertTrue((work_dir / "_intermediate" / "junk2.tmp").exists())
             self.assertIn("SAS_CCF=/data/ccf.cif", (work_dir / "execution.log").read_text())
 
             # Re-running with skip_if_exists=True should skip
@@ -212,8 +206,7 @@ class TestSASCommandAndRunner(unittest.TestCase):
                 _PrintPfilesCmd(
                     program="mock_sas",
                     cwd=work_dir,
-                    core_outputs=[],
-                    intermediate_dir=None,
+                    expected_outputs=[],
                 )
             )
             log_text = res.log_path.read_text(encoding="utf-8").strip()
