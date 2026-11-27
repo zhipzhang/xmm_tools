@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import astropy.units as u
+import numpy as np
 import regions as astropy_regions
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
@@ -36,7 +37,7 @@ class BoxRegion:
     dec_deg: float
     width_arcsec: float
     height_arcsec: float
-    angle_deg: float = 0.0  # DS9 box angle (deg counter-clockwise from North/East axis)
+    angle_deg: float = 0.0  # DS9 sky angle (deg counter-clockwise from East-West / -RA axis)
     include: bool = True
 
 
@@ -49,7 +50,7 @@ class EllipseRegion:
     dec_deg: float
     semi_major_arcsec: float
     semi_minor_arcsec: float
-    angle_deg: float = 0.0
+    angle_deg: float = 0.0  # DS9 sky angle (deg counter-clockwise from East-West / -RA axis)
     include: bool = True
 
 
@@ -91,9 +92,10 @@ def generate_strip_grid(params: StripGridParams) -> list[BoxRegion]:
     )
     step_arcsec = params.width_arcsec + params.gap_arcsec
     pa = params.pa_deg * u.deg
-    # DS9 box(ra, dec, width, height, angle): angle=0 aligns width with East-West;
-    # rotating by (90 - pa) aligns `width` along `pa` (East of North).
-    ds9_angle = (90.0 - params.pa_deg) % 360.0
+    # DS9 box(ra, dec, width, height, angle): angle=0 aligns width with East-West,
+    # and positive angle rotates counter-clockwise on the sky (increasing PA).
+    # Rotating by (pa - 90) aligns `width` along `pa` (East of North).
+    ds9_angle = (params.pa_deg - 90.0) % 360.0
 
     boxes: list[BoxRegion] = []
     for idx in range(params.count):
@@ -143,43 +145,51 @@ def strip_params_from_sky_points(
     )
 
 
+def _sky_offsets_to_pixels(
+    ra_deg: float,
+    dec_deg: float,
+    x_arcsec: np.ndarray,
+    y_arcsec: np.ndarray,
+    angle_deg: float,
+    img: FitsImageData,
+) -> list[tuple[float, float]] | None:
+    """Project local DS9 ``(x_arcsec, y_arcsec)`` tangent offsets to 0-based pixels.
+
+    In DS9 sky coordinates on a standard North-up, East-left chart, ``+x`` at
+    ``angle_deg=0`` points West (``PA = 270°``), ``+y`` points North (``PA = 0°``),
+    and ``angle_deg`` rotates counter-clockwise on the sky (from West toward North,
+    i.e. increasing Position Angle East of North).
+    """
+    if img.wcs is None:
+        return None
+    center = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="fk5")
+    alpha = math.radians(angle_deg)
+    ca, sa = math.cos(alpha), math.sin(alpha)
+    d_east = -x_arcsec * ca + y_arcsec * sa
+    d_north = x_arcsec * sa + y_arcsec * ca
+    sep = np.hypot(d_east, d_north) * u.arcsec
+    pa = np.arctan2(d_east, d_north) * u.rad
+    pts = center.directional_offset_by(pa, sep)
+    xs, ys = img.wcs.wcs_world2pix(pts.ra.deg, pts.dec.deg, 0)
+    if not (np.all(np.isfinite(xs)) and np.all(np.isfinite(ys))):
+        return None
+    return [(float(x), float(y)) for x, y in zip(xs, ys)]
+
+
 def box_corners_pixels(
     box: BoxRegion, img: FitsImageData
 ) -> list[tuple[float, float]] | None:
     """Compute the 4 corner coordinates in 0-based pixels for ImPlot overlay."""
-    center_px = sky_to_pixel(img, box.ra_deg, box.dec_deg)
-    if center_px is None:
-        return None
-    cx, cy = center_px
-    scale = max(img.pixel_scale_arcsec, 1e-6)
-    hw = 0.5 * box.width_arcsec / scale
-    hh = 0.5 * box.height_arcsec / scale
-
-    # In standard north-up image, East is -x (left) and North is +y (up),
-    # so angle_deg counter-clockwise from +x corresponds to -angle_deg or +angle_deg
-    # depending on parity; compute sky corners directly via WCS for exactness.
-    if img.wcs is not None:
-        center = SkyCoord(ra=box.ra_deg * u.deg, dec=box.dec_deg * u.deg, frame="fk5")
-        pa_width = (90.0 - box.angle_deg) * u.deg
-        pa_height = (180.0 - box.angle_deg) * u.deg
-        hw_arc = 0.5 * box.width_arcsec * u.arcsec
-        hh_arc = 0.5 * box.height_arcsec * u.arcsec
-        corners: list[tuple[float, float]] = []
-        for s_w, s_h in ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)):
-            pt = center.directional_offset_by(pa_width, s_w * hw_arc)
-            pt = pt.directional_offset_by(pa_height, s_h * hh_arc)
-            px = sky_to_pixel(img, float(pt.ra.deg), float(pt.dec.deg))
-            if px is None:
-                return None
-            corners.append(px)
-        return corners
-
-    rad = math.radians(box.angle_deg)
-    ca, sa = math.cos(rad), math.sin(rad)
-    return [
-        (cx + sx * hw * ca - sy * hh * sa, cy + sx * hw * sa + sy * hh * ca)
-        for sx, sy in ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0))
-    ]
+    hw = 0.5 * box.width_arcsec
+    hh = 0.5 * box.height_arcsec
+    return _sky_offsets_to_pixels(
+        box.ra_deg,
+        box.dec_deg,
+        np.array([-hw, hw, hw, -hw], dtype=float),
+        np.array([-hh, -hh, hh, hh], dtype=float),
+        box.angle_deg,
+        img,
+    )
 
 
 def resize_box_edge(
@@ -192,7 +202,7 @@ def resize_box_edge(
 ) -> BoxRegion:
     """Single-edge height stretch: keep the opposite edge fixed and update center & height."""
     center = SkyCoord(ra=box.ra_deg * u.deg, dec=box.dec_deg * u.deg, frame="fk5")
-    pa_top_deg = (180.0 - box.angle_deg) % 360.0
+    pa_top_deg = box.angle_deg % 360.0
     if edge == "top":
         anchor_dir = (pa_top_deg + 180.0) % 360.0
         grow_dir = pa_top_deg
@@ -222,27 +232,15 @@ def ellipse_outline_pixels(
     ellipse: EllipseRegion, img: FitsImageData, *, n_pts: int = 48
 ) -> list[tuple[float, float]] | None:
     """Sample an ``EllipseRegion`` boundary in 0-based pixel coordinates."""
-    if img.wcs is None:
-        return None
-    center = SkyCoord(
-        ra=ellipse.ra_deg * u.deg, dec=ellipse.dec_deg * u.deg, frame="fk5"
+    theta = np.linspace(0.0, 2.0 * math.pi, n_pts, endpoint=False)
+    return _sky_offsets_to_pixels(
+        ellipse.ra_deg,
+        ellipse.dec_deg,
+        ellipse.semi_major_arcsec * np.cos(theta),
+        ellipse.semi_minor_arcsec * np.sin(theta),
+        ellipse.angle_deg,
+        img,
     )
-    pa_major = (90.0 - ellipse.angle_deg) * u.deg
-    pa_minor = (180.0 - ellipse.angle_deg) * u.deg
-    pts: list[tuple[float, float]] = []
-    for i in range(n_pts):
-        theta = 2.0 * math.pi * i / n_pts
-        pt = center.directional_offset_by(
-            pa_major, ellipse.semi_major_arcsec * math.cos(theta) * u.arcsec
-        )
-        pt = pt.directional_offset_by(
-            pa_minor, ellipse.semi_minor_arcsec * math.sin(theta) * u.arcsec
-        )
-        px = sky_to_pixel(img, float(pt.ra.deg), float(pt.dec.deg))
-        if px is None:
-            return None
-        pts.append(px)
-    return pts
 
 
 def polygon_pixels(
@@ -302,6 +300,18 @@ def export_ds9_regions(
     return out_path
 
 
+def _sky_center_and_angle_fk5(
+    center: SkyCoord, angle: u.Quantity
+) -> tuple[SkyCoord, float]:
+    """Transform ``center`` and DS9 sky rotation ``angle`` into the FK5 frame."""
+    fk5 = center.fk5
+    ang_deg = float(angle.to_value(u.deg))
+    if not center.is_equivalent_frame(fk5):
+        north = center.directional_offset_by(0.0 * u.deg, 1.0 * u.arcsec)
+        ang_deg = (ang_deg + float(fk5.position_angle(north.fk5).deg)) % 360.0
+    return fk5, ang_deg
+
+
 def parse_ds9_regions(
     path: str | Path, *, wcs: WCS | None = None
 ) -> list[RegionItem]:
@@ -330,7 +340,7 @@ def parse_ds9_regions(
                 )
             )
         elif isinstance(reg, astropy_regions.RectangleSkyRegion):
-            fk5 = reg.center.fk5
+            fk5, ang_deg = _sky_center_and_angle_fk5(reg.center, reg.angle)
             items.append(
                 BoxRegion(
                     name=name,
@@ -338,12 +348,12 @@ def parse_ds9_regions(
                     dec_deg=float(fk5.dec.deg),
                     width_arcsec=float(reg.width.to_value(u.arcsec)),
                     height_arcsec=float(reg.height.to_value(u.arcsec)),
-                    angle_deg=float(reg.angle.to_value(u.deg)),
+                    angle_deg=ang_deg,
                     include=include,
                 )
             )
         elif isinstance(reg, astropy_regions.EllipseSkyRegion):
-            fk5 = reg.center.fk5
+            fk5, ang_deg = _sky_center_and_angle_fk5(reg.center, reg.angle)
             items.append(
                 EllipseRegion(
                     name=name,
@@ -351,7 +361,7 @@ def parse_ds9_regions(
                     dec_deg=float(fk5.dec.deg),
                     semi_major_arcsec=0.5 * float(reg.width.to_value(u.arcsec)),
                     semi_minor_arcsec=0.5 * float(reg.height.to_value(u.arcsec)),
-                    angle_deg=float(reg.angle.to_value(u.deg)),
+                    angle_deg=ang_deg,
                     include=include,
                 )
             )

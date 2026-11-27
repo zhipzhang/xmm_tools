@@ -6,11 +6,13 @@ from pathlib import Path
 
 import astropy.units as u
 import numpy as np
+import regions as astropy_regions
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
 
 from xmm_tools.image import (
+    BoxRegion,
     CircleRegion,
     EllipseRegion,
     PolygonRegion,
@@ -166,20 +168,25 @@ class TestFitsImageAndRegions(unittest.TestCase):
             self.assertEqual(len(state.regions), 7)
 
     def test_resize_box_edge_single_side_stretch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fpath = _write_test_fits(Path(tmp) / "flux.fits")
+            img = load_fits_image(fpath)
+
         params = StripGridParams(
             start_ra_deg=287.956,
             start_dec_deg=4.982,
-            pa_deg=90.0,
+            pa_deg=125.0,
             width_arcsec=20.0,
             height_arcsec=40.0,
             count=1,
             prefix="b",
         )
         box = generate_strip_grid(params)[0]
-        # Original top edge is 20" along pa_top = 180 - 90 = 90 deg? Wait:
-        # pa_top_deg = (180 - angle_deg) = 180 - 0 = 180 deg (South) or 0 deg.
-        # Move drag point 30" further along pa_top_deg from original center -> new height = 50"
-        pa_top = (180.0 - box.angle_deg) % 360.0
+        corners_before = box_corners_pixels(box, img)
+        self.assertIsNotNone(corners_before)
+        bot_mid_before = np.mean(corners_before[:2], axis=0)
+
+        pa_top = box.angle_deg % 360.0
         orig_center = SkyCoord(ra=box.ra_deg * u.deg, dec=box.dec_deg * u.deg, frame="fk5")
         orig_bottom = orig_center.directional_offset_by(
             ((pa_top + 180.0) % 360.0) * u.deg, 20.0 * u.arcsec
@@ -188,12 +195,122 @@ class TestFitsImageAndRegions(unittest.TestCase):
         resize_box_edge(box, float(new_top.ra.deg), float(new_top.dec.deg), edge="top")
 
         self.assertAlmostEqual(box.height_arcsec, 60.0, places=2)
-        # Opposite (bottom) edge should remain fixed
+        # Opposite (bottom) edge and its pixel handle must remain fixed
         new_center = SkyCoord(ra=box.ra_deg * u.deg, dec=box.dec_deg * u.deg, frame="fk5")
         new_bottom = new_center.directional_offset_by(
             ((pa_top + 180.0) % 360.0) * u.deg, 30.0 * u.arcsec
         )
         self.assertAlmostEqual(float(orig_bottom.separation(new_bottom).arcsec), 0.0, places=2)
+        corners_after = box_corners_pixels(box, img)
+        self.assertIsNotNone(corners_after)
+        np.testing.assert_allclose(
+            np.mean(corners_after[:2], axis=0), bot_mid_before, atol=1e-2
+        )
+
+    def test_ds9_ellipse_and_box_counterclockwise_angles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fpath = _write_test_fits(root / "flux.fits")
+            img = load_fits_image(fpath)
+            assert img.wcs is not None
+
+            # 1. FK5 ellipse & box with positive DS9 angle must rotate CCW on sky/image
+            # (+major at theta=0 moves toward +x, +y on North-up East-left TAN image)
+            for ang in (0.0, 30.0, 45.0, 135.0, 315.0):
+                center = SkyCoord(287.956 * u.deg, 4.982 * u.deg, frame="fk5")
+                ell = EllipseRegion("ell", 287.956, 4.982, 40.0, 12.0, angle_deg=ang)
+                pts = np.asarray(ellipse_outline_pixels(ell, img, n_pts=48))
+                expected_ell = (
+                    astropy_regions.EllipseSkyRegion(
+                        center, 80.0 * u.arcsec, 24.0 * u.arcsec, angle=ang * u.deg
+                    )
+                    .to_pixel(img.wcs)
+                    .to_polygon(n_vertices=48)
+                    .vertices
+                )
+                np.testing.assert_allclose(pts[:, 0], expected_ell.x, atol=0.05)
+                np.testing.assert_allclose(pts[:, 1], expected_ell.y, atol=0.05)
+
+                box = BoxRegion("box", 287.956, 4.982, 80.0, 24.0, angle_deg=ang)
+                corners = np.asarray(box_corners_pixels(box, img))
+                expected_box = (
+                    astropy_regions.RectangleSkyRegion(
+                        center, 80.0 * u.arcsec, 24.0 * u.arcsec, angle=ang * u.deg
+                    )
+                    .to_pixel(img.wcs)
+                    .corners
+                )
+                np.testing.assert_allclose(corners, expected_box, atol=0.05)
+
+            # Explicit sign check at 30 deg: +major endpoint is up-right (dx > 0, dy > 0)
+            c_px = sky_to_pixel(img, 287.956, 4.982)
+            assert c_px is not None
+            pts30 = ellipse_outline_pixels(
+                EllipseRegion("e30", 287.956, 4.982, 40.0, 12.0, angle_deg=30.0),
+                img,
+                n_pts=48,
+            )
+            assert pts30 is not None
+            self.assertGreater(pts30[0][0] - c_px[0], 8.0)
+            self.assertGreater(pts30[0][1] - c_px[1], 4.5)
+
+            # 2. Image-frame and Galactic-frame DS9 .reg files preserve exact pixel orientation
+            img_reg = root / "image_ell.reg"
+            img_reg.write_text(
+                "image\nellipse(33, 33, 10, 3, 35) # text={img_ell}\n",
+                encoding="utf-8",
+            )
+            parsed_img = parse_ds9_regions(img_reg, wcs=img.wcs)
+            self.assertEqual(len(parsed_img), 1)
+            assert isinstance(parsed_img[0], EllipseRegion)
+            pts_img = np.asarray(ellipse_outline_pixels(parsed_img[0], img, n_pts=48))
+            gt_img = (
+                astropy_regions.Regions.read(img_reg, format="ds9")[0]
+                .to_polygon(n_vertices=48)
+                .vertices
+            )
+            np.testing.assert_allclose(pts_img[:, 0], gt_img.x, atol=0.05)
+            np.testing.assert_allclose(pts_img[:, 1], gt_img.y, atol=0.05)
+
+            gal_c = SkyCoord(287.956 * u.deg, 4.982 * u.deg, frame="fk5").galactic
+            gal_reg = root / "gal_ell.reg"
+            gal_reg.write_text(
+                f'galactic\nellipse({gal_c.l.deg:.7f},{gal_c.b.deg:.7f},36",12",25) # text={{gal}}\n',
+                encoding="utf-8",
+            )
+            parsed_gal = parse_ds9_regions(gal_reg, wcs=img.wcs)
+            assert isinstance(parsed_gal[0], EllipseRegion)
+            pts_gal = np.asarray(ellipse_outline_pixels(parsed_gal[0], img, n_pts=48))
+            gt_gal = (
+                astropy_regions.Regions.read(gal_reg, format="ds9")[0]
+                .to_pixel(img.wcs)
+                .to_polygon(n_vertices=48)
+                .vertices
+            )
+            np.testing.assert_allclose(pts_gal[:, 0], gt_gal.x, atol=0.05)
+            np.testing.assert_allclose(pts_gal[:, 1], gt_gal.y, atol=0.05)
+
+            # 3. Oblique strip grid exported to DS9 .reg has contiguous abutting edges in DS9
+            oblique = generate_strip_grid(
+                StripGridParams(
+                    start_ra_deg=287.956,
+                    start_dec_deg=4.982,
+                    pa_deg=125.0,
+                    width_arcsec=20.0,
+                    height_arcsec=48.0,
+                    count=2,
+                )
+            )
+            strip_reg = root / "strip.reg"
+            export_ds9_regions(oblique, strip_reg)
+            ds9_boxes = [
+                r.to_pixel(img.wcs)
+                for r in astropy_regions.Regions.read(strip_reg, format="ds9")
+            ]
+            # Box 0 left (-x_local / East-side) edge must coincide with Box 1 right (+x_local) edge
+            edge0 = np.sort(ds9_boxes[0].corners[[0, 3]], axis=0)
+            edge1 = np.sort(ds9_boxes[1].corners[[1, 2]], axis=0)
+            np.testing.assert_allclose(edge0, edge1, atol=0.05)
 
 
 if __name__ == "__main__":
