@@ -27,38 +27,38 @@ pip install -e ".[dev,docs]"
 ## Quick Start
 
 ```bash
-# 1. One-time ODF initialization (generates esas.toml + standardized *_evt.fits)
-xmm-esas init --odf-dir /path/to/ODF --workdir ./esas_work --ccfpath /ccf/valid
+# 1. One-time ODF initialization (generates ana.toml + standardized *_evt.fits)
+xmm-ana init --odf-dir /path/to/ODF --workdir ./esas_work --ccfpath /ccf/valid
 cd esas_work
 
-# 2. Run all config-driven stages automatically (flare -> cheese -> quick-image -> spectrum)
-#    (spectrum is skipped cleanly if [[spectrum.regions]] is not configured yet)
-xmm-esas run --config esas.toml
+# 2. Run all config-driven stages automatically (flare -> cheese -> qpb-image -> spectrum)
+#    (spectrum is skipped cleanly if [[esas.spectrum.regions]] is not configured yet)
+xmm-ana run --config ana.toml
 
 # 3. Or run specific stages / a stage range:
-xmm-esas run --config esas.toml --stages flare,cheese
-xmm-esas run --config esas.toml --from cheese --to spectrum
-xmm-esas run --config esas.toml --skip quick-image
+xmm-ana run --config ana.toml --stages flare,cheese
+xmm-ana run --config ana.toml --from cheese --to spectrum
+xmm-ana run --config ana.toml --skip qpb-image
 
 # 4. Or run any individual stage directly:
-xmm-esas flare --config esas.toml
-xmm-esas cheese --config esas.toml
-xmm-esas quick-image --config esas.toml
-xmm-esas spectrum --config esas.toml
+xmm-ana flare --config ana.toml
+xmm-ana cheese --config ana.toml
+xmm-ana qpb-image --config ana.toml
+xmm-ana spectrum --config ana.toml
 ```
 
 Interactive viewers:
 
 ```bash
 xmm-qdp soft_proton_flare/mos1_evt-hist.qdp
-xmm-img quick_image/soft_500_2000_flux.fits
+xmm-img qpb_image/soft_500_2000_flux.fits
 ```
 
 ## Documentation
 
 Build the Sphinx HTML documentation locally (includes a full annotated
-`esas.toml` reference, pipeline guide, GUI workflows, and Sherpa joint-fitting
-examples):
+`ana.toml` reference, pipeline guide, `QPBProducts` usage, GUI workflows, and
+Sherpa joint-fitting examples):
 
 ```bash
 sphinx-build -b html docs docs/_build/html
