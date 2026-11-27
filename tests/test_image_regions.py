@@ -167,6 +167,17 @@ class TestFitsImageAndRegions(unittest.TestCase):
             state.finish_polygon_draft()
             self.assertEqual(len(state.regions), 7)
 
+            # Full-FOV size bounds cover >= 1500" radius & >= 3000" box/strip span,
+            # and scale dynamically for larger mosaic images.
+            max_rad, max_ext = state.size_bounds_arcsec()
+            self.assertGreaterEqual(max_rad, 1500.0)
+            self.assertGreaterEqual(max_ext, 3000.0)
+            wide_fits = _write_test_fits(root / "mosaic.fits", ny=1200, nx=1200)
+            state.open_file(wide_fits)  # 1200 * 4"/pix = 4800"
+            mosaic_rad, mosaic_ext = state.size_bounds_arcsec()
+            self.assertGreater(mosaic_rad, 4000.0)
+            self.assertGreater(mosaic_ext, 7000.0)
+
     def test_resize_box_edge_single_side_stretch(self):
         with tempfile.TemporaryDirectory() as tmp:
             fpath = _write_test_fits(Path(tmp) / "flux.fits")

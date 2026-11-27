@@ -241,6 +241,22 @@ class ImageViewerState:
             self._cached_display_key = key
         return self._display_flipped
 
+    def size_bounds_arcsec(self) -> tuple[float, float]:
+        """Return ``(max_radius_arcsec, max_extent_arcsec)`` scaled to image FOV.
+
+        Defaults cover at least the full ~30' (1800\") XMM-Newton EPIC field of
+        view with margin (1500\" radius, 3000\" box/strip span) and expand
+        automatically for larger mosaic images.
+        """
+        fov_span = 2000.0
+        if self.image is not None:
+            ny, nx = self.image.shape
+            img_span = float(max(nx, ny)) * max(self.image.pixel_scale_arcsec, 0.1)
+            fov_span = max(fov_span, img_span)
+        max_radius = float(round(max(1500.0, 0.85 * fov_span), -1))
+        max_extent = float(round(max(3000.0, 1.5 * fov_span), -1))
+        return max_radius, max_extent
+
     def preview_boxes(self) -> list[BoxRegion]:
         if self.image is None or not self.preview_strip:
             return []
@@ -392,22 +408,40 @@ def _draw_selected_region_editor(state: ImageViewerState) -> None:
         return
     reg = state.regions[idx]
 
+    max_rad, max_ext = state.size_bounds_arcsec()
+    log_flag = imgui.SliderFlags_.logarithmic
+
     imgui.separator_text(f"Edit Selected: {reg.name}")
     _, reg.name = imgui.input_text("Name##edit_name", reg.name)
     _, reg.include = imgui.checkbox("Include (off = Exclude -)##edit_inc", reg.include)
 
     if isinstance(reg, CircleRegion):
         _, reg.radius_arcsec = imgui.slider_float(
-            "Radius (\")##edit_r", reg.radius_arcsec, 2.0, 400.0, "%.1f"
+            "Radius (\")##edit_r",
+            reg.radius_arcsec,
+            1.0,
+            max(max_rad, reg.radius_arcsec),
+            "%.1f",
+            log_flag,
         )
         _, reg.ra_deg = imgui.input_double("RA (deg)##edit_cra", reg.ra_deg, 0.0, 0.0, "%.6f")
         _, reg.dec_deg = imgui.input_double("Dec (deg)##edit_cdec", reg.dec_deg, 0.0, 0.0, "%.6f")
     elif isinstance(reg, BoxRegion):
         _, reg.width_arcsec = imgui.slider_float(
-            "Width (\")##edit_bw", reg.width_arcsec, 2.0, 400.0, "%.1f"
+            "Width (\")##edit_bw",
+            reg.width_arcsec,
+            1.0,
+            max(max_ext, reg.width_arcsec),
+            "%.1f",
+            log_flag,
         )
         _, reg.height_arcsec = imgui.slider_float(
-            "Height (\")##edit_bh", reg.height_arcsec, 2.0, 600.0, "%.1f"
+            "Height (\")##edit_bh",
+            reg.height_arcsec,
+            1.0,
+            max(max_ext, reg.height_arcsec),
+            "%.1f",
+            log_flag,
         )
         _, reg.angle_deg = imgui.slider_float(
             "Angle (deg)##edit_ba", reg.angle_deg, 0.0, 360.0, "%.1f"
@@ -418,10 +452,20 @@ def _draw_selected_region_editor(state: ImageViewerState) -> None:
             imgui.tree_pop()
     elif isinstance(reg, EllipseRegion):
         _, reg.semi_major_arcsec = imgui.slider_float(
-            "Semi-Major (\")##edit_ea", reg.semi_major_arcsec, 2.0, 400.0, "%.1f"
+            "Semi-Major (\")##edit_ea",
+            reg.semi_major_arcsec,
+            1.0,
+            max(max_rad, reg.semi_major_arcsec),
+            "%.1f",
+            log_flag,
         )
         _, reg.semi_minor_arcsec = imgui.slider_float(
-            "Semi-Minor (\")##edit_eb", reg.semi_minor_arcsec, 2.0, 400.0, "%.1f"
+            "Semi-Minor (\")##edit_eb",
+            reg.semi_minor_arcsec,
+            1.0,
+            max(max_rad, reg.semi_minor_arcsec),
+            "%.1f",
+            log_flag,
         )
         _, reg.angle_deg = imgui.slider_float(
             "Angle (deg)##edit_eang", reg.angle_deg, 0.0, 360.0, "%.1f"
@@ -481,16 +525,35 @@ def _draw_sidebar(state: ImageViewerState) -> None:
             state.vmax = max(new_max, state.vmin + 1e-12)
             state.manual_limits = True
 
+    max_rad, max_ext = state.size_bounds_arcsec()
+    log_flag = imgui.SliderFlags_.logarithmic
+
     if imgui.collapsing_header("Strip Grid Generator", imgui.TreeNodeFlags_.default_open):
         sp = state.strip_params
         _, state.preview_strip = imgui.checkbox("Show Strip Handles", state.preview_strip)
         imgui.same_line()
         imgui.text_disabled("(drag dots on image)")
 
-        ch_w, sp.width_arcsec = imgui.slider_float("Bin Width (\")", sp.width_arcsec, 4.0, 200.0, "%.1f")
-        _, sp.height_arcsec = imgui.slider_float("Bin Height (\")", sp.height_arcsec, 4.0, 400.0, "%.1f")
-        ch_g, sp.gap_arcsec = imgui.slider_float("Gap (\")", sp.gap_arcsec, 0.0, 100.0, "%.1f")
-        ch_c, sp.count = imgui.slider_int("Count", sp.count, 1, 40)
+        ch_w, sp.width_arcsec = imgui.slider_float(
+            "Bin Width (\")",
+            sp.width_arcsec,
+            1.0,
+            max(max_rad, sp.width_arcsec),
+            "%.1f",
+            log_flag,
+        )
+        _, sp.height_arcsec = imgui.slider_float(
+            "Bin Height (\")",
+            sp.height_arcsec,
+            2.0,
+            max(max_ext, sp.height_arcsec),
+            "%.1f",
+            log_flag,
+        )
+        ch_g, sp.gap_arcsec = imgui.slider_float(
+            "Gap (\")", sp.gap_arcsec, 0.0, max(600.0, sp.gap_arcsec), "%.1f"
+        )
+        ch_c, sp.count = imgui.slider_int("Count", sp.count, 1, max(100, sp.count))
         if ch_w or ch_g or ch_c:
             state.strip_end_sky = None
         _, sp.prefix = imgui.input_text("Prefix", sp.prefix)
@@ -543,28 +606,54 @@ def _draw_sidebar(state: ImageViewerState) -> None:
 
         if state.add_shape_idx == 0:
             _, state.add_radius_arcsec = imgui.slider_float(
-                "Radius (\")", state.add_radius_arcsec, 2.0, 300.0, "%.1f"
+                "Radius (\")",
+                state.add_radius_arcsec,
+                1.0,
+                max(max_rad, state.add_radius_arcsec),
+                "%.1f",
+                log_flag,
             )
         elif state.add_shape_idx == 1:
             _, state.add_width_arcsec = imgui.slider_float(
-                "Box W (\")", state.add_width_arcsec, 2.0, 400.0, "%.1f"
+                "Box W (\")",
+                state.add_width_arcsec,
+                1.0,
+                max(max_ext, state.add_width_arcsec),
+                "%.1f",
+                log_flag,
             )
             _, state.add_height_arcsec = imgui.slider_float(
-                "Box H (\")", state.add_height_arcsec, 2.0, 400.0, "%.1f"
+                "Box H (\")",
+                state.add_height_arcsec,
+                1.0,
+                max(max_ext, state.add_height_arcsec),
+                "%.1f",
+                log_flag,
             )
             _, state.add_angle_deg = imgui.slider_float(
                 "Angle (deg)", state.add_angle_deg, 0.0, 360.0, "%.1f"
             )
         elif state.add_shape_idx == 2:
             _, state.add_semi_major_arcsec = imgui.slider_float(
-                "Semi-Major (\")", state.add_semi_major_arcsec, 2.0, 300.0, "%.1f"
+                "Semi-Major (\")",
+                state.add_semi_major_arcsec,
+                1.0,
+                max(max_rad, state.add_semi_major_arcsec),
+                "%.1f",
+                log_flag,
             )
             _, state.add_semi_minor_arcsec = imgui.slider_float(
-                "Semi-Minor (\")", state.add_semi_minor_arcsec, 2.0, 300.0, "%.1f"
+                "Semi-Minor (\")",
+                state.add_semi_minor_arcsec,
+                1.0,
+                max(max_rad, state.add_semi_minor_arcsec),
+                "%.1f",
+                log_flag,
             )
             _, state.add_angle_deg = imgui.slider_float(
                 "Angle (deg)", state.add_angle_deg, 0.0, 360.0, "%.1f"
             )
+        imgui.text_disabled("Tip: Cmd/Ctrl+Click slider to enter exact value")
 
         if state.add_shape_idx < 3:
             if state.placing_region:
