@@ -17,6 +17,7 @@ dependencies = [
 xmm-qdp = "xmm_tools.qdp.gui:main"
 xmm-img = "xmm_tools.image.gui:main"
 xmm-ana = "xmm_tools.pipeline.cli:main"
+xmm-srclist = "xmm_tools.srclist.gui:main"
 
 [project.optional-dependencies]
 gui = [
