@@ -9,10 +9,13 @@ from pathlib import Path
 import tomllib
 
 from xmm_tools.config import (
+    VALID_BKGRATE_STYLES,
+    VALID_RADIUS_STYLES,
     AnaConfig,
     BandSpec,
     EspfiltConfig,
     FlareConfig,
+    MaskConfig,
     SpectrumConfig,
     SpectrumRegionSpec,
     load_ana_config,
@@ -27,6 +30,9 @@ class TestConfigPackage(unittest.TestCase):
         self.assertIs(legacy_config_shim.FlareConfig, FlareConfig)
         self.assertIs(legacy_config_shim.EspfiltConfig, FlareConfig)
         self.assertIs(EspfiltConfig, FlareConfig)
+        self.assertIs(legacy_config_shim.MaskConfig, MaskConfig)
+        self.assertEqual(legacy_config_shim.VALID_RADIUS_STYLES, VALID_RADIUS_STYLES)
+        self.assertEqual(legacy_config_shim.VALID_BKGRATE_STYLES, VALID_BKGRATE_STYLES)
 
     def test_single_pass_load_and_flare_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,6 +145,73 @@ subbands = [[500, 2500]]
             FlareConfig(elow=8500, ehigh=2500)
         with self.assertRaises(ValueError):
             FlareConfig(allowsigma=0.0)
+
+    def test_validation_rejects_invalid_mask_params(self):
+        with self.assertRaises(ValueError):
+            MaskConfig(radius_style="invalid")
+        with self.assertRaises(ValueError):
+            MaskConfig(bkgrate_style="median")
+        for bad_pos in (0.0, -0.5, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                MaskConfig(bkg_fraction=bad_pos)
+            with self.assertRaises(ValueError):
+                MaskConfig(bkgrate_user=bad_pos)
+            with self.assertRaises(ValueError):
+                MaskConfig(fixed_radius=bad_pos)
+        for bad_eef in (0.0, 1.0, -0.1, 1.2, float("nan")):
+            with self.assertRaises(ValueError):
+                MaskConfig(energy_fraction=bad_eef)
+        with self.assertRaises(TypeError):
+            MaskConfig(bkg_fraction=True)
+        with self.assertRaises(TypeError):
+            MaskConfig(bkgrate_user=False)
+        with self.assertRaises(TypeError):
+            MaskConfig(energy_fraction=True)
+        with self.assertRaises(TypeError):
+            MaskConfig(fixed_radius=True)
+        with self.assertRaises(TypeError):
+            MaskConfig(nosrcellipse="false")  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            MaskConfig(expression=123)  # type: ignore[arg-type]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_bool_toml = Path(tmp) / "bad_mask_bool.toml"
+            bad_bool_toml.write_text(
+                '[esas.mask]\nnosrcellipse = "false"\n', encoding="utf-8"
+            )
+            with self.assertRaises(TypeError):
+                load_ana_config(bad_bool_toml)
+
+            bad_num_toml = Path(tmp) / "bad_mask_num.toml"
+            bad_num_toml.write_text(
+                "[esas.mask]\nbkg_fraction = true\n", encoding="utf-8"
+            )
+            with self.assertRaises(TypeError):
+                load_ana_config(bad_num_toml)
+
+    def test_mask_and_mask_dir_toml_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            toml_path = root / "ana.toml"
+            rendered = render_template_toml(workdir=".")
+            toml_path.write_text(rendered, encoding="utf-8")
+            cfg_default = load_ana_config(toml_path)
+            self.assertEqual(cfg_default.mask, MaskConfig())
+            self.assertEqual(cfg_default.spectrum.mask_dir, "")
+
+            custom_toml = (
+                rendered.replace('radius_style = "contour"', 'radius_style = "enfrac"')
+                .replace("energy_fraction = 0.85", "energy_fraction = 0.92")
+                .replace(
+                    '# mask_dir = ""',
+                    'mask_dir = "custom_masks"',
+                )
+            )
+            toml_path.write_text(custom_toml, encoding="utf-8")
+            cfg_custom = AnaConfig.from_toml(toml_path)
+            self.assertEqual(cfg_custom.mask.radius_style, "enfrac")
+            self.assertAlmostEqual(cfg_custom.mask.energy_fraction, 0.92)
+            self.assertEqual(cfg_custom.spectrum.mask_dir, "custom_masks")
 
     def test_legacy_espfilt_constructor_and_template_escaping(self):
         cfg = AnaConfig(espfilt=FlareConfig(allowsigma=2.5))

@@ -260,6 +260,11 @@ def create_relative_symlink(
     rel_target = _to_posix(os.path.relpath(src, dst.parent))
 
     if dst.is_symlink():
+        try:
+            if os.readlink(dst) == rel_target:
+                return dst
+        except OSError:
+            pass
         replace_existing = True
     elif dst.exists():
         if dst.is_dir():

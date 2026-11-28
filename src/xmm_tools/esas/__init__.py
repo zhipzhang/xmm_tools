@@ -1,4 +1,4 @@
-"""ESAS standard extended-source tasks: ``flare``, ``cheese``, ``spectrum``."""
+"""ESAS standard extended-source tasks: ``flare``, ``cheese``, ``mask``, ``spectrum``."""
 
 from xmm_tools.esas.cheese import (
     CheeseDetector,
@@ -8,6 +8,7 @@ from xmm_tools.esas.cheese import (
     run_cheese,
 )
 from xmm_tools.esas.flare import FlareResult, load_flare_result, run_flare
+from xmm_tools.esas.mask import run_region_mask
 from xmm_tools.esas.naming import (
     ALLEVC_SUFFIX,
     ALLEVCOOT_SUFFIX,
@@ -50,6 +51,7 @@ __all__ = [
     "load_spectrum_result",
     "run_cheese",
     "run_flare",
+    "run_region_mask",
     "run_spectrum",
     "sky_region_to_esas_expr",
     "strip_esas_suffix",

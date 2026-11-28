@@ -2,6 +2,8 @@
 
 from xmm_tools.config.loader import load_ana_config
 from xmm_tools.config.schema import (
+    VALID_BKGRATE_STYLES,
+    VALID_RADIUS_STYLES,
     VALID_REGION_MODES,
     AnaConfig,
     BandSpec,
@@ -9,6 +11,7 @@ from xmm_tools.config.schema import (
     EspfiltConfig,
     FlareConfig,
     InstrumentsConfig,
+    MaskConfig,
     PathsConfig,
     QPBImageConfig,
     SpectrumConfig,
@@ -17,6 +20,8 @@ from xmm_tools.config.schema import (
 from xmm_tools.config.template import render_template_toml
 
 __all__ = [
+    "VALID_BKGRATE_STYLES",
+    "VALID_RADIUS_STYLES",
     "VALID_REGION_MODES",
     "AnaConfig",
     "BandSpec",
@@ -24,6 +29,7 @@ __all__ = [
     "EspfiltConfig",
     "FlareConfig",
     "InstrumentsConfig",
+    "MaskConfig",
     "PathsConfig",
     "QPBImageConfig",
     "SpectrumConfig",

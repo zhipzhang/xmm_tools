@@ -141,6 +141,7 @@ def run_spectrum(
     only: list[str] | None = None,
     flare: FlareResult | None = None,
     mask_res: CheeseResult | None = None,
+    mask_dir: str | Path | None = None,
     dry_run: bool = False,
     force: bool = False,
     docker_container: str | None = None,
@@ -191,8 +192,13 @@ def run_spectrum(
     )
 
     flare_res = flare if flare is not None else load_flare_result(cfg)
+    eff_mask_dir = (
+        str(mask_dir).strip()
+        if (mask_dir is not None and str(mask_dir).strip())
+        else (spec_cfg.mask_dir or None)
+    )
     if mask_res is None and spec_cfg.withsrcrem:
-        mask_res = load_cheese_result(cfg)
+        mask_res = load_cheese_result(cfg, mask_dir=eff_mask_dir)
 
     active_insts = [i for i in INSTRUMENTS if i in flare_res.clean_events]
     if not active_insts:

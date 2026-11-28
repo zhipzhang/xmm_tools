@@ -194,4 +194,14 @@ def load_stage_manifest_payload(
                 f"{stage_manifest.status!r}; expected 'completed' or 'reused'."
             )
         return stage_manifest, stage_manifest.products
-    return None, raw if isinstance(raw, Mapping) else {}
+    payload = raw if isinstance(raw, Mapping) else {}
+    if (
+        require_completed
+        and "status" in payload
+        and payload["status"] not in {"completed", "reused"}
+    ):
+        raise RuntimeError(
+            f"{stage_label} stage at {manifest_path} has status "
+            f"{payload['status']!r}; expected 'completed' or 'reused'."
+        )
+    return None, payload

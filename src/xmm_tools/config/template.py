@@ -109,6 +109,17 @@ ratetotal = 0.2                      # Total-band flux/rate threshold for maskin
 keepinterfiles = false               # Let SAS clean up its own temporary files
 extra_params = {{}}                    # Extra key=value parameters passed through to cheese
 
+[esas.mask]
+radius_style = "contour"             # "contour" (PSF flux contour) | "enfrac" (PSF EEF circle) | "userfixed" (fixed circle)
+bkg_fraction = 0.4                   # [contour] Cutoff as fraction of local BG_MAP (smaller = larger holes)
+bkgrate_style = "col"                # [contour] "col" (read BG_MAP column) | "user" (constant bkgrate_user)
+bkgrate_user = 1.0                   # [contour] Constant background (counts/pixel) when bkgrate_style = "user"
+nosrcellipse = false                 # [contour] Force circles (radius = semi-major axis) instead of ellipses
+energy_fraction = 0.85               # [enfrac] Fraction of PSF energy enclosed (0 < val < 1, larger = larger holes)
+fixed_radius = 25.0                  # [userfixed] Constant exclusion circle radius (arcsec)
+expression = ""                      # Optional SAS selectlib filter on SRCLIST (empty = use all rows)
+extra_params = {{}}                    # Extra scalar key=value parameters passed through to SAS region
+
 [esas.spectrum]
 max_workers = 2                      # Concurrent workers for multi-region extraction
 elow = 400                           # Default spectrum lower energy bound (eV)
@@ -116,6 +127,7 @@ ehigh = 7200                         # Default spectrum upper energy bound (eV)
 pattern_mos = 12                     # Event pattern threshold for MOS1/MOS2
 pattern_pn = 4                       # Event pattern threshold for EPIC-pn
 withsrcrem = true                    # Apply cheese point-source masks
+# mask_dir = ""                      # Optional custom mask directory (e.g. from xmm-ana mask); empty = use paths.cheese_dir
 keepinterfiles = true                # Keep intermediate spectra/plot products
 withplotfiles = true                 # Generate QDP diagnostic plots in mosback/pnback
 mos1_ccds = "T T F T T F T"          # Active MOS1 CCDs (CCD3 & CCD6 disabled)

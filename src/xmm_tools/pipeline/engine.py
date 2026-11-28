@@ -32,6 +32,7 @@ def _build_stage_registry(
     config: AnaConfig | None = None,
     regions: list[SpectrumRegionSpec] | None = None,
     only: list[str] | None = None,
+    mask_dir: str | Path | None = None,
 ) -> tuple[StageSpec, ...]:
     def _skip_spectrum(ctx: PipelineContext, explicit: set[str]) -> str | None:
         target_specs = regions if regions is not None else ctx.config.spectrum.regions
@@ -39,9 +40,13 @@ def _build_stage_registry(
             return "no [[esas.spectrum.regions]] configured in ana.toml"
         return None
 
+    has_custom_mask = bool(
+        (mask_dir is not None and str(mask_dir).strip())
+        or (config is not None and config.spectrum.mask_dir)
+    )
     spectrum_requires = (
         ("flare", "cheese")
-        if (config is None or config.spectrum.withsrcrem)
+        if ((config is None or config.spectrum.withsrcrem) and not has_custom_mask)
         else ("flare",)
     )
 
@@ -86,7 +91,8 @@ def _build_stage_registry(
                 regions=regions,
                 only=only,
                 flare=ctx.artifacts.get("flare"),
-                mask_res=ctx.artifacts.get("cheese"),
+                mask_res=None if has_custom_mask else ctx.artifacts.get("cheese"),
+                mask_dir=mask_dir,
                 dry_run=ctx.dry_run,
                 force=ctx.force,
                 docker_container=ctx.docker_container,
@@ -203,6 +209,7 @@ def run_pipeline(
     skip: Iterable[str] | None = None,
     regions: list[SpectrumRegionSpec] | None = None,
     only: list[str] | None = None,
+    mask_dir: str | Path | None = None,
     dry_run: bool = False,
     force: bool = False,
     docker_container: str | None = None,
@@ -226,7 +233,12 @@ def run_pipeline(
     )
     registry = {
         spec.name: spec
-        for spec in _build_stage_registry(config=cfg, regions=regions, only=only)
+        for spec in _build_stage_registry(
+            config=cfg,
+            regions=regions,
+            only=only,
+            mask_dir=mask_dir,
+        )
     }
 
     result = PipelineResult(

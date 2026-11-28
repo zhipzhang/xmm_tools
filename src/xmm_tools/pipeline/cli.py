@@ -6,9 +6,16 @@ import argparse
 import sys
 from pathlib import Path
 
-from xmm_tools.config import AnaConfig, SpectrumRegionSpec
+from xmm_tools.config import (
+    VALID_BKGRATE_STYLES,
+    VALID_RADIUS_STYLES,
+    AnaConfig,
+    MaskConfig,
+    SpectrumRegionSpec,
+)
 from xmm_tools.esas.cheese import run_cheese
 from xmm_tools.esas.flare import run_flare
+from xmm_tools.esas.mask import run_region_mask
 from xmm_tools.esas.spectrum import run_spectrum
 from xmm_tools.exec import StageManifest
 from xmm_tools.pipeline.engine import PIPELINE_STAGES, run_pipeline
@@ -155,6 +162,75 @@ def build_parser() -> argparse.ArgumentParser:
         force_help="Re-run steps even if outputs and manifest already match.",
     )
 
+    p_mask = sub.add_parser(
+        "mask",
+        help="[ESAS] Generate custom sky/det point-source masks from an external source list via SAS region.",
+    )
+    _add_config_arg(p_mask)
+    p_mask.add_argument(
+        "--srclist",
+        required=True,
+        help="Path to external or merged source list FITS file (e.g. merged_emllist.fits).",
+    )
+    p_mask.add_argument(
+        "--out-dir",
+        required=True,
+        help="Output directory for generated mask FITS files (must differ from [paths].cheese_dir).",
+    )
+    p_mask.add_argument(
+        "--radius-style",
+        choices=VALID_RADIUS_STYLES,
+        default=None,
+        help="Override [esas.mask].radius_style.",
+    )
+    p_mask.add_argument(
+        "--bkg-fraction",
+        type=float,
+        default=None,
+        help="Override [esas.mask].bkg_fraction ([contour]).",
+    )
+    p_mask.add_argument(
+        "--bkgrate-style",
+        choices=VALID_BKGRATE_STYLES,
+        default=None,
+        help="Override [esas.mask].bkgrate_style ([contour]).",
+    )
+    p_mask.add_argument(
+        "--bkgrate-user",
+        type=float,
+        default=None,
+        help="Override [esas.mask].bkgrate_user ([contour] with bkgrate-style='user').",
+    )
+    p_mask.add_argument(
+        "--nosrcellipse",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override [esas.mask].nosrcellipse ([contour]).",
+    )
+    p_mask.add_argument(
+        "--energy-fraction",
+        type=float,
+        default=None,
+        help="Override [esas.mask].energy_fraction ([enfrac]).",
+    )
+    p_mask.add_argument(
+        "--fixed-radius",
+        type=float,
+        default=None,
+        help="Override [esas.mask].fixed_radius ([userfixed], arcsec).",
+    )
+    p_mask.add_argument(
+        "--expression",
+        type=str,
+        default=None,
+        help="Override [esas.mask].expression (SAS selectlib filter on SRCLIST).",
+    )
+    _add_common_exec_args(
+        p_mask,
+        dry_run_help="Validate config & parameters without running SAS or writing files.",
+        force_help="Re-run steps even if outputs and manifest already match.",
+    )
+
     p_qi = sub.add_parser(
         "qpb-image",
         help="[SAS] Generate QPB-subtracted flux images via evqpb + eimageget + eimagecombine.",
@@ -197,6 +273,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--overwrite",
         action="store_true",
         help="Overwrite existing manifest entries.",
+    )
+    p_spec.add_argument(
+        "--mask-dir",
+        default=None,
+        help="Custom point-source mask directory overriding [paths].cheese_dir.",
     )
     _add_common_exec_args(
         p_spec,
@@ -241,6 +322,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help="Forward --only filter to 'spectrum'.",
+    )
+    p_run.add_argument(
+        "--mask-dir",
+        default=None,
+        help="Custom point-source mask directory overriding [paths].cheese_dir.",
     )
     _add_common_exec_args(
         p_run,
@@ -310,6 +396,72 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  mask[{key}]: {path.name}")
         return 0
 
+    if args.subcommand == "mask":
+        cfg = AnaConfig.from_toml(args.config)
+        base = cfg.mask
+        mask_cfg = MaskConfig(
+            radius_style=(
+                args.radius_style
+                if args.radius_style is not None
+                else base.radius_style
+            ),
+            bkg_fraction=(
+                args.bkg_fraction
+                if args.bkg_fraction is not None
+                else base.bkg_fraction
+            ),
+            bkgrate_style=(
+                args.bkgrate_style
+                if args.bkgrate_style is not None
+                else base.bkgrate_style
+            ),
+            bkgrate_user=(
+                args.bkgrate_user
+                if args.bkgrate_user is not None
+                else base.bkgrate_user
+            ),
+            nosrcellipse=(
+                args.nosrcellipse
+                if args.nosrcellipse is not None
+                else base.nosrcellipse
+            ),
+            energy_fraction=(
+                args.energy_fraction
+                if args.energy_fraction is not None
+                else base.energy_fraction
+            ),
+            fixed_radius=(
+                args.fixed_radius
+                if args.fixed_radius is not None
+                else base.fixed_radius
+            ),
+            expression=(
+                args.expression if args.expression is not None else base.expression
+            ),
+            extra_params=dict(base.extra_params),
+        )
+        res = run_region_mask(
+            cfg,
+            srclist=args.srclist,
+            out_dir=args.out_dir,
+            mask_cfg=mask_cfg,
+            dry_run=args.dry_run,
+            force=args.force,
+            docker_container=args.docker,
+        )
+        print(f"Mask dir: {res.cheese_dir}")
+        print(
+            f"Manifest: {res.manifest_path} "
+            f"(method={res.method}){_status_tag(res.manifest)}"
+        )
+        if res.emllist:
+            print(f"  emllist: {res.emllist.name}")
+        for key, path in res.region_det.items():
+            print(f"  det[{key}]: {path.name}")
+        for key, path in res.region_sky.items():
+            print(f"  sky[{key}]: {path.name}")
+        return 0
+
     if args.subcommand == "qpb-image":
         cfg = AnaConfig.from_toml(args.config)
         res = run_qpb_image(
@@ -341,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg,
             regions=ad_hoc,
             only=args.only,
+            mask_dir=args.mask_dir,
             dry_run=args.dry_run,
             force=args.force,
             docker_container=args.docker,
@@ -366,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
             to_stage=args.to_stage,
             skip=args.skip,
             only=args.only,
+            mask_dir=args.mask_dir,
             dry_run=args.dry_run,
             force=args.force,
             docker_container=args.docker,
